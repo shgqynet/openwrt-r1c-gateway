@@ -1,0 +1,49 @@
+#!/bin/sh
+# ==============================================================================
+# r1c-status — 网关状态总览（需求 §50）
+# 输出：Internet / VPN / PLC 状态、Site、PLC 网段、VPN IP、Uptime
+# ==============================================================================
+CONF="/etc/r1c/site.conf"
+[ -f "$CONF" ] && . "$CONF"
+
+echo "=============================================="
+echo " Xiaomi R1C — Industrial Remote Gateway"
+echo "=============================================="
+echo "Site ID        ${SITE_ID:-UNSET}"
+echo "Hostname       $(cat /proc/sys/kernel/hostname)"
+echo "PLC Network    ${PLC_NETWORK:-UNSET}  (gw ${PLC_GATEWAY:-UNSET})"
+echo "VPN Mode       ${VPN_MODE:-UNSET}"
+echo "Uptime         $(uptime | sed 's/^.*up //; s/,.*//')"
+echo
+
+# --- Internet ---
+if ip route 2>/dev/null | grep -q default; then
+    echo "Internet       ONLINE (default route present)"
+else
+    echo "Internet       OFFLINE (no default route)"
+fi
+
+# --- VPN ---
+vpn_ip=""
+if command -v wg >/dev/null 2>&1; then
+    for iface in $(uci -q show network | grep -oE "network\.[a-z0-9_]+" | cut -d. -f2 | sort -u); do
+        if [ "$(uci -q get network.$iface.proto)" = "wireguard" ]; then
+            vpn_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+            [ -n "$vpn_ip" ] && break
+        fi
+    done
+fi
+[ -n "$vpn_ip" ] && echo "VPN            ONLINE (${vpn_ip})" || echo "VPN            OFFLINE"
+
+# --- PLC ---
+if [ -n "${PLC_GATEWAY:-}" ]; then
+    if ping -c1 -W2 "$PLC_GATEWAY" >/dev/null 2>&1; then
+        echo "PLC Network    ONLINE (gw ${PLC_GATEWAY} reachable)"
+    else
+        echo "PLC Network    OFFLINE (gw ${PLC_GATEWAY} unreachable)"
+    fi
+fi
+
+echo
+echo "Remote Access  ${REMOTE_MAINTENANCE:-disabled} (timeout: ${REMOTE_TIMEOUT:-manual})"
+echo "=============================================="

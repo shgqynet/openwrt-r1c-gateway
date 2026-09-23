@@ -1,0 +1,210 @@
+# ==============================================================================
+# R1C Industrial Remote Gateway — GitHub Actions 云端构建
+#
+# 基于 P3TERX/Actions-OpenWrt 思路，针对本项目改造：
+#   - 目标改为 ramips/mt7620 -> xiaomi_miwifi-mini（去掉 VMDK/ESXi 步骤）
+#   - 配置走 configs/r1c-gateway.config（而非仓库根 .config）
+#   - 源码 commit 锁定（工业固件必须可复现，不追 master）
+#   - 增加固件大小检查，超阈值直接 BUILD FAILED（需求 §44）
+#   - 增加 ccache 缓存加速增量构建
+#
+# ⚠️ GitHub-hosted runner（2026 官方规格）：
+#     公开仓库: 4 vCPU / 16 GB RAM / 14 GB SSD（免费无限分钟）
+#     私有仓库: 2 vCPU /  8 GB RAM / 14 GB SSD（消耗配额）
+#     14 GB SSD 是主要瓶颈 → 必须执行 free-disk-space，且不要加回大型插件
+# ==============================================================================
+name: R1C Gateway Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_unlock:
+        description: '忽略 lede.commit 锁定，使用分支最新代码'
+        type: boolean
+        default: false
+  push:
+    paths:
+      - 'configs/**'
+      - 'files/**'
+      - 'package/**'
+      - 'patches/**'
+      - 'diy-part1.sh'
+      - 'diy-part2.sh'
+      - 'diy-part2.d/**'
+      - '.github/workflows/build-r1c.yml'
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  CONFIG_FILE: configs/r1c-gateway.config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # 14 GB SSD 不够用，必须清理预装的大型工具链
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint \
+          binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler \
+          fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man \
+          intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+          libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build \
+          p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools \
+          qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
+          unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        echo "BUILD_VERSION=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_ENV
+        sudo mkdir -p /workdir
+        sudo chown "$USER:$GROUPS" /workdir
+        df -hT /workdir
+
+    - name: Restore ccache
+      uses: actions/cache@v4
+      with:
+        path: /workdir/.ccache
+        key: r1c-ccache-${{ runner.os }}-${{ hashFiles('configs/r1c-gateway.config') }}
+        restore-keys: r1c-ccache-${{ runner.os }}-
+
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        if [ "${{ inputs.force_unlock }}" != "true" ] && [ -f "$GITHUB_WORKSPACE/lede.commit" ]; then
+          LOCKED=$(tr -d ' \t\r\n' < "$GITHUB_WORKSPACE/lede.commit")
+          git fetch --depth 1 origin "$LOCKED"
+          git checkout -f "$LOCKED"
+          echo "✅ 锁定 commit: $LOCKED"
+        else
+          echo "⚠️  未锁定，使用 $REPO_BRANCH 最新 HEAD: $(git rev-parse HEAD)"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/lede.commit"
+        fi
+        ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
+
+    - name: Load custom feeds
+      run: |
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+
+    - name: Update and install feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load custom configuration
+      run: |
+        cd openwrt
+        cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+        chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+        "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+    - name: Download package
+      id: package
+      timeout-minutes: 60
+      run: |
+        cd openwrt
+        make defconfig
+        # defconfig 会覆盖版本号，必须在其后注入
+        sed -i '/^CONFIG_VERSION_NUMBER=/d' .config
+        echo "CONFIG_VERSION_NUMBER=\"${{ env.BUILD_VERSION }}\"" >> .config
+        # 启用 ccache（依赖 /workdir/.ccache）
+        echo "CONFIG_CCACHE=y" >> .config
+        echo "CONFIG_CCACHE_DIR=\"/workdir/.ccache\"" >> .config
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec rm -f {} \;
+        make download -j1 V=s || (sleep 3 && make download -j1 V=s)
+        df -hT /workdir
+
+    - name: Compile the firmware
+      id: compile
+      timeout-minutes: 300
+      run: |
+        cd openwrt
+        echo "使用 $(nproc) 线程编译"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        df -hT /workdir
+
+    - name: Firmware size check (需求 §44)
+      id: sizecheck
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt
+        BIN=$(ls bin/targets/ramips/mt7620/*miwifi-mini*squashfs-sysupgrade.bin 2>/dev/null | head -1)
+        if [ -z "$BIN" ]; then
+          echo "❌ 未找到 sysupgrade 镜像"; exit 1
+        fi
+        bash "$GITHUB_WORKSPACE/scripts/check-size.sh" "$BIN" 15872
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Generate release package
+      id: release
+      if: steps.sizecheck.outputs.status == 'success'
+      run: |
+        cd openwrt
+        bash "$GITHUB_WORKSPACE/scripts/make-release.sh" \
+          "$GITHUB_WORKSPACE/openwrt/bin/targets/ramips/mt7620" "${{ env.BUILD_VERSION }}"
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware artifact
+      uses: actions/upload-artifact@v4
+      if: steps.release.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      with:
+        name: r1c-gateway-${{ env.BUILD_VERSION }}
+        path: releases/r1c-gateway-${{ env.BUILD_VERSION }}
+        retention-days: 90
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v2
+      if: steps.release.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.BUILD_VERSION }}
+        name: "R1C Gateway ${{ env.BUILD_VERSION }}"
+        body: |
+          Device: Xiaomi MiWiFi Mini (R1C)
+          Target: ramips/mt7620 (mipsel_24kc)
+          Source: coolsnowwolf/lede @ ${{ github.sha }}
+        files: releases/r1c-gateway-${{ env.BUILD_VERSION }}/*
+
+    # 注意：不删除历史 Release —— 工业固件需要可追溯的版本归档
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 7
+        keep_minimum_runs: 5

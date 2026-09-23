@@ -1,0 +1,82 @@
+#!/bin/sh
+# ==============================================================================
+# r1c-diagnose — 诊断报告（需求 §51）
+# 依次检查：WAN / DNS / Internet / VPN / Route / PLC 网关 / PLC TCP / RAM / Flash
+#
+# ⚠️  只读诊断，不修改任何配置，不重启任何服务
+# ==============================================================================
+CONF="/etc/r1c/site.conf"
+[ -f "$CONF" ] && . "$CONF"
+
+REPORT="/tmp/r1c-diagnose-$(date +%Y%m%d-%H%M).txt"
+: > "$REPORT"
+
+say() { echo "$1"; echo "$1" >> "$REPORT"; }
+
+say "=============================================================="
+say " R1C Industrial Remote Gateway — Diagnostic Report"
+say " $(date)"
+say "=============================================================="
+say "Site ID: ${SITE_ID:-UNSET}   Hostname: $(cat /proc/sys/kernel/hostname)"
+say ""
+
+say "[1] WAN"
+ip -4 route show default | head -3 | while read -r l; do say "    $l"; done
+say ""
+
+say "[2] DNS"
+cat /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null | grep nameserver | while read -r l; do say "    $l"; done
+say ""
+
+say "[3] Internet"
+ping -c2 -W3 "${INTERNET_TEST_HOST:-1.1.1.1}" >/dev/null 2>&1 \
+    && say "    REACHABLE (${INTERNET_TEST_HOST:-1.1.1.1})" \
+    || say "    UNREACHABLE (${INTERNET_TEST_HOST:-1.1.1.1})"
+say ""
+
+say "[4] VPN (${VPN_MODE:-wireguard})"
+if command -v wg >/dev/null 2>&1 && wg show 2>/dev/null | grep -q interface; then
+    wg show | grep -E "interface|latest handshake|transfer" | while read -r l; do say "    $l"; done
+else
+    say "    WireGuard interface not active"
+fi
+say ""
+
+say "[5] Route to PLC"
+[ -n "${PLC_NETWORK:-}" ] && ip route get "${PLC_NETWORK%/*}" 2>/dev/null | while read -r l; do say "    $l"; done
+say ""
+
+say "[6] PLC Gateway (${PLC_GATEWAY:-UNSET})"
+[ -n "${PLC_GATEWAY:-}" ] && {
+    ping -c2 -W2 "$PLC_GATEWAY" >/dev/null 2>&1 && say "    PING OK" || say "    PING FAILED"
+    ip neigh show "$PLC_GATEWAY" 2>/dev/null | while read -r l; do say "    ARP: $l"; done
+}
+say ""
+
+say "[7] PLC TCP ports (只做连通性，不发送任何工业协议命令)"
+for entry in ${PLC_DEVICES:-}; do
+    name=$(echo "$entry" | cut -d'|' -f1)
+    ip=$(echo "$entry"   | cut -d'|' -f2)
+    type=$(echo "$entry" | cut -d'|' -f3)
+    case "$type" in
+        s7) port=102 ;;
+        ab) port=44818 ;;
+        *)  port=80 ;;
+    esac
+    (echo > /dev/tcp/$ip/$port) >/dev/null 2>&1 \
+        && say "    $name ($ip) TCP/$port OPEN" \
+        || say "    $name ($ip) TCP/$port CLOSED or filtered"
+done
+say ""
+
+say "[8] RAM"
+free | head -2 | while read -r l; do say "    $l"; done
+say ""
+
+say "[9] Flash"
+df -h /overlay / 2>/dev/null | while read -r l; do say "    $l"; done
+say ""
+
+say "=============================================================="
+say "报告已保存: $REPORT"
+say "=============================================================="

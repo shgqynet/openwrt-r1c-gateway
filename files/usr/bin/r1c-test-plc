@@ -1,0 +1,58 @@
+#!/bin/sh
+# ==============================================================================
+# r1c-test-plc — 单台 PLC 连通性测试（需求 §52）
+#
+# 用法: r1c-test-plc <IP> [s7|ab]
+#   s7 -> TCP 102     ab -> TCP 44818 (EtherNet/IP)
+#
+# ⚠️  严格只读：只做 Ping / TCP 端口连通 / Route / ARP
+# ⚠️  禁止发送任何 S7 或 EtherNet/IP 协议报文，禁止读/写/控制/下载
+# ==============================================================================
+
+IP="${1:-}"
+TYPE="${2:-s7}"
+
+if [ -z "$IP" ]; then
+    echo "用法: r1c-test-plc <IP> [s7|ab]"
+    exit 1
+fi
+
+case "$TYPE" in
+    s7) PORT=102 ;;
+    ab) PORT=44818 ;;
+    *)  echo "未知类型: $TYPE (支持 s7 / ab)"; exit 1 ;;
+esac
+
+echo "PLC:"
+echo "  $IP  (type=$TYPE)"
+echo
+
+echo -n "Ping:        "
+ping -c2 -W2 "$IP" >/dev/null 2>&1 && echo "PASS" || echo "FAIL"
+
+echo -n "TCP $PORT:   "
+(echo > /dev/tcp/$IP/$PORT) >/dev/null 2>&1 && echo "PASS" || echo "FAIL"
+
+echo -n "Route:       "
+if ip route get "$IP" 2>/dev/null | grep -q "$IP"; then
+    echo "PASS"
+    ip route get "$IP" | head -1 | sed 's/^/             /'
+else
+    echo "FAIL"
+fi
+
+echo -n "ARP:         "
+arp=$(ip neigh show "$IP" 2>/dev/null)
+if [ -n "$arp" ]; then
+    echo "PASS"
+    echo "             $arp"
+else
+    echo "UNKNOWN (未在邻居表中，可能需先 ping)"
+fi
+
+echo
+if ping -c1 -W2 "$IP" >/dev/null 2>&1; then
+    echo "PLC:         REACHABLE"
+else
+    echo "PLC:         UNREACHABLE"
+fi

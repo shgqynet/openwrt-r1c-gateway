@@ -1,0 +1,20 @@
+# 关键：shell 脚本必须强制 LF 换行
+# 否则 Windows 检出的 CRLF 会让脚本在 Linux runner 上报
+#   /bin/bash^M: bad interpreter
+*.sh        text eol=lf
+*.conf      text eol=lf
+Makefile    text eol=lf
+
+# 无扩展名的可执行脚本（init.d / usr/bin 下的工具）
+/etc/init.d/*  text eol=lf
+files/**       text eol=lf
+scripts/**     text eol=lf
+diy-part2.d/** text eol=lf
+
+# 二进制固件不参与 diff/转换
+*.bin       binary
+*.gz        binary
+
+# 文档按 LF 存储
+*.md        text eol=lf
+*.yml       text eol=lf
