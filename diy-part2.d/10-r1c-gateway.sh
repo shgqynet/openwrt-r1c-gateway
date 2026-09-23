@@ -13,6 +13,18 @@ for pkg in r1c-gateway; do
         rm -rf "package/$pkg/files"
         cp -r "$REPO_SRC/files" "package/$pkg/files"
         echo "  -> copied package/$pkg (+files)"
+
+        # 选中该包。必须在 done 之前写 .config，
+        # 后续 make defconfig 才能识别到 package tree 里已存在的条目。
+        # 复制目录不等于选中——这是首次构建中 r1c-gateway 未进固件的根因。
+        if [ -f .config ]; then
+            sed -i '/^# CONFIG_PACKAGE_'"$pkg"' is not set$/d' .config
+            grep -q "^CONFIG_PACKAGE_${pkg}=y$" .config || \
+                echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+            echo "  -> .config: CONFIG_PACKAGE_${pkg}=y"
+        else
+            echo "  ⚠️  未找到 .config，跳过选包（后续 package 不会被编入固件）"
+        fi
     else
         echo "  ⚠️  未找到 $REPO_SRC/package/$pkg"
     fi

@@ -2,4 +2,3 @@ openwrt/
 releases/
 build.log
 .workbuddy/tmp/
-source.commit

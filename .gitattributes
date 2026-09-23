@@ -11,6 +11,9 @@ files/**       text eol=lf
 scripts/**     text eol=lf
 diy-part2.d/** text eol=lf
 
+# source.commit 会被 runner 读取用于 checkout，必须 LF
+source.commit text eol=lf
+
 # 二进制固件不参与 diff/转换
 *.bin       binary
 *.gz        binary

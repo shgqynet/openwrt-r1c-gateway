@@ -155,7 +155,20 @@ jobs:
       run: |
         cd openwrt
         echo "使用 $(nproc) 线程编译"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        LOG="$GITHUB_WORKSPACE/build.log"
+        # tee 捕获日志供 release 归档；注意 pipeline 的退出码来自 tee，
+        # 必须取 PIPESTATUS[0] 才能拿到 make 的真实结果。
+        make -j$(nproc) 2>&1 | tee "$LOG"
+        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+          echo "::warning::并行编译失败，降级为 -j1 V=s 重试"
+          make -j1 V=s 2>&1 | tee -a "$LOG"
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "❌ 编译失败"
+            tail -n 200 "$LOG"
+            exit 1
+          fi
+        fi
+        du -h "$LOG"
         echo "status=success" >> $GITHUB_OUTPUT
         df -hT /workdir
 

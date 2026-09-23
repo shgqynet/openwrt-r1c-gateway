@@ -18,6 +18,33 @@ OUT="$BASE_DIR/releases/${PROFILE}-${VERSION}"
 
 mkdir -p "$OUT"
 
+# ------------------------------------------------------------------------------
+# 内核版本探测
+# 不能读 include/kernel.mk —— 那里是 "LINUX_VERSION?=" 占位符，取出来会是
+# 字面量 "<LINUX_VERSION>"。实际可用的来源按可靠性排序：
+#   1. ipk 文件名		kmod-tun_6.6.110-1_mipsel_24kc.ipk
+#   2. build_dir 目录名	build_dir/linux-ramips_mt7620/linux-6.6.110
+#   3. target Makefile	KERNEL_PATCHVER（仅有 6.6 这种两级号）
+# ------------------------------------------------------------------------------
+detect_kernel() {
+    local v=""
+    # 1) 从 ipk 提取：<name>_<ver>-<rel>_<arch>.ipk
+    v=$(find "$BIN_DIR" -maxdepth 2 -name '*.ipk' -printf '%f\n' 2>/dev/null \
+        | head -1 | sed -nE 's/^.*_([0-9]+\.[0-9]+(\.[0-9]+)?)-[0-9]+_.*$/\1/p')
+    [ -n "$v" ] && { echo "$v"; return; }
+    # 2) 从已解压的内核源码目录名提取
+    v=$(ls -d "$SRC_DIR"/build_dir/linux-*ramips*/linux-* 2>/dev/null \
+        | head -1 | sed -nE 's#.*/linux-([0-9]+\.[0-9]+(\.[0-9]+)?)$#\1#p')
+    [ -n "$v" ] && { echo "$v"; return; }
+    # 3) 退化为 target 声明的 patchver
+    v=$(sed -nE 's/^KERNEL_PATCHVER:=([0-9.]+).*/\1/p' \
+        "$SRC_DIR/target/linux/ramips/Makefile" 2>/dev/null | head -1)
+    [ -n "$v" ] && { echo "$v"; return; }
+    echo "unknown"
+}
+
+mkdir -p "$OUT"
+
 # 镜像
 for f in "$BIN_DIR"/*miwifi-mini*.bin; do
     [ -f "$f" ] || continue
@@ -43,8 +70,9 @@ done
     echo "target:         ramips/mt7620"
     echo "arch:           mipsel_24kc"
     echo "source:         openwrt/openwrt (openwrt-24.10)"
-    echo "source_commit:  $(cat "$BASE_DIR/openwrt.commit" 2>/dev/null || echo unknown)"
-    echo "kernel:         $(grep -m1 'LINUX_VERSION' "$SRC_DIR/include/kernel.mk" 2>/dev/null || echo n/a)"
+    # 注意：文件名是 source.commit（曾误写为 openwrt.commit，导致 manifest 恒为 unknown）
+    echo "source_commit:  $(cat "$BASE_DIR/source.commit" 2>/dev/null || echo unknown)"
+    echo "kernel:         $(detect_kernel)"
     echo ""
     echo "[images]"
     ( cd "$OUT" && ls -l *.bin 2>/dev/null | awk '{print "  "$9"  "$5" bytes"}')
@@ -60,8 +88,32 @@ done
 } > "$OUT/manifest"
 
 # build.log
+# 完整编译日志可达数十 MB，直接塞进 Release 既不理性也无必要。
+# 归档策略：错误/警告全量保留，其余只留尾部；超 20000 行则截断。
+summarize_build_log() {
+    local src="$1" dst="$2"
+    local total
+    total=$(wc -l < "$src" 2>/dev/null || echo 0)
+    {
+        echo "# Build log (excerpt) — total ${total} lines"
+        echo "# Full log is retained in the Actions run output."
+        echo ""
+        echo "===== ERRORS / FATAL ====="
+        grep -nE "Error [0-9]+|make.*\*\*\*|Makefile:[0-9]+:.*Error|FATAL|No space left" "$src" \
+            | head -100 || true
+        echo ""
+        echo "===== WARNINGS (first 100) ====="
+        grep -nE "WARNING|warning:" "$src" | head -100 || true
+        echo ""
+        echo "===== TAIL (last 3000 lines of ${total}) ====="
+        tail -n 3000 "$src"
+    } > "$dst"
+}
+
 if [ -f "$BASE_DIR/build.log" ]; then
-    cp "$BASE_DIR/build.log" "$OUT/build.log"
+    summarize_build_log "$BASE_DIR/build.log" "$OUT/build.log"
+    SIZE=$(du -h "$OUT/build.log" | cut -f1)
+    echo "  -> build.log: $SIZE (摘录)"
 else
     echo "build.log not captured (run: make ... 2>&1 | tee build.log)" > "$OUT/build.log"
 fi
