@@ -22,24 +22,39 @@ mkdir -p "$OUT"
 # 内核版本探测
 # 不能读 include/kernel.mk —— 那里是 "LINUX_VERSION?=" 占位符，取出来会是
 # 字面量 "<LINUX_VERSION>"。实际可用的来源按可靠性排序：
-#   1. ipk 文件名		kmod-tun_6.6.110-1_mipsel_24kc.ipk
-#   2. build_dir 目录名	build_dir/linux-ramips_mt7620/linux-6.6.110
-#   3. target Makefile	KERNEL_PATCHVER（仅有 6.6 这种两级号）
+#   1. ipk 文件名            kmod-tun_6.6.156-1_mipsel_24kc.ipk
+#   2. build_dir 目录名      build_dir/linux-ramips_mt7620/linux-6.6.156
+#   3. KERNEL_PATCHVER + include/kernel-<v> 的 LINUX_VERSION-<v> 后缀 → 6.6 + .156
+#   4. 仅 KERNEL_PATCHVER（退化，只有 6.6）
+#
+# 实测 note：OpenWrt 24.10 起 kmod 包改由独立 packages repo 分发，
+# target 的 bin 目录下常常不再有 packages/*.ipk，因此 1 经常落空；
+# 3 是离线最可靠的完整版本来源（例：LINUX_VERSION-6.6 = .156）。
 # ------------------------------------------------------------------------------
 detect_kernel() {
-    local v=""
+    local v="" pv="" suffix="" esc=""
     # 1) 从 ipk 提取：<name>_<ver>-<rel>_<arch>.ipk
-    v=$(find "$BIN_DIR" -maxdepth 2 -name '*.ipk' -printf '%f\n' 2>/dev/null \
+    v=$(find "$BIN_DIR" -maxdepth 3 -name '*.ipk' -printf '%f\n' 2>/dev/null \
         | head -1 | sed -nE 's/^.*_([0-9]+\.[0-9]+(\.[0-9]+)?)-[0-9]+_.*$/\1/p')
     [ -n "$v" ] && { echo "$v"; return; }
     # 2) 从已解压的内核源码目录名提取
     v=$(ls -d "$SRC_DIR"/build_dir/linux-*ramips*/linux-* 2>/dev/null \
         | head -1 | sed -nE 's#.*/linux-([0-9]+\.[0-9]+(\.[0-9]+)?)$#\1#p')
     [ -n "$v" ] && { echo "$v"; return; }
-    # 3) 退化为 target 声明的 patchver
-    v=$(sed -nE 's/^KERNEL_PATCHVER:=([0-9.]+).*/\1/p' \
+    # 3) KERNEL_PATCHVER + include/kernel-<pv> 的版本后缀
+    pv=$(sed -nE 's/^KERNEL_PATCHVER:=([0-9.]+).*/\1/p' \
         "$SRC_DIR/target/linux/ramips/Makefile" 2>/dev/null | head -1)
-    [ -n "$v" ] && { echo "$v"; return; }
+    if [ -n "$pv" ]; then
+        esc=${pv//./\\.}   # 6.6 -> 6\.6，避免 sed 正则里 . 通配
+        suffix=$(sed -nE "s/^LINUX_VERSION-${esc}[[:space:]]*=[[:space:]]*([0-9.]+).*/\1/p" \
+            "$SRC_DIR/include/kernel-${pv}" 2>/dev/null | head -1)
+        if [ -n "$suffix" ]; then
+            echo "${pv}${suffix}"    # 6.6 + .156 = 6.6.156
+            return
+        fi
+        echo "$pv"                   # 4) 退化
+        return
+    fi
     echo "unknown"
 }
 
