@@ -7,15 +7,15 @@
 #
 # 注意（与参考仓库一致）：
 #   - git clean 时必须排除我们手动复制进来的本地包目录，否则会被删掉触发重编
-#   - 工业固件锁定 commit，默认【不】跟随 lede master 更新
+#   - 工业固件锁定 commit，默认【不】跟随分支滚动更新
 # ==============================================================================
 set -e
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR"
 
-[ -d "$BASE_DIR/lede" ] || { echo "❌ 未找到 lede/，请先执行 ./build.sh"; exit 1; }
+[ -d "$BASE_DIR/openwrt" ] || { echo "❌ 未找到 openwrt/，请先执行 ./build.sh"; exit 1; }
 
-cd lede
+cd openwrt
 
 echo "[1/5] 撤销上一次 diy 造成的源码改动（保留缓存）"
 git checkout .
@@ -23,10 +23,10 @@ git checkout .
 git clean -df -e package/r1c-gateway
 
 echo "[2/5] 源码版本（锁定模式）"
-if [ -f "$BASE_DIR/lede.commit" ]; then
-    LOCKED=$(tr -d ' \t\r\n' < "$BASE_DIR/lede.commit")
+if [ -f "$BASE_DIR/source.commit" ]; then
+    LOCKED=$(tr -d ' \t\r\n' < "$BASE_DIR/source.commit")
     echo "  锁定 commit: $LOCKED"
-    git fetch --all
+    git fetch --depth 1 origin "$LOCKED"
     git checkout -f "$LOCKED"
 else
     echo "  ⚠️  未锁定，使用当前 HEAD: $(git rev-parse HEAD)"

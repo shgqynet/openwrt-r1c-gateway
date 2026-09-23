@@ -57,10 +57,34 @@ suifeng009/openwrt
 
 ---
 
-## 2. 基础源码树选型（✅ 已决策：路线 B — Lean's lede）
+## 2. 基础源码树选型（✅ 最终决策：路线 A — OpenWrt 官方 24.10）
 
-> 决策记录（2026-09-23，用户确认）：**采用 coolsnowwolf/lede**，理由是与参考仓库脚本 100% 兼容、落地最快。
-> 风险对冲：**锁定 commit**，不追 master 滚动更新。
+> **决策变更记录**
+>
+> - 2026-09-23 上午：选路线 B（`coolsnowwolf/lede`），理由是参考仓库脚本 100% 兼容、落地最快。
+> - 2026-09-23 下午：GitHub Actions 首次全量编译（run `35824775628`）**失败** → 根因定位为 lede 上游缺陷 → **改选路线 A**。
+>
+> **路线 B 的失败证据（CI 实证 + 源码取证）**
+>
+> ```
+> ERROR: module '.../linux-5.10.270/lib/crypto/libchacha.ko' is missing.
+> *** [modules/crypto.mk:600: kmod-crypto-lib-chacha20_5.10.270-1_mipsel_24kc.ipk] Error 1
+> ```
+>
+> | 取证项 | 实际内容 |
+> | --- | --- |
+> | lede `crypto.mk` 第 568 行 | `ifeq ($(KERNEL_PATCHVER),6.12)` 包裹住 **mips32r2 分支** |
+> | lede ramips 可用内核 | 仅 `config-5.10` / `5.4` / `6.18` → **不存在 6.12**，MIPS 优化路径永不生效 |
+> | lede `crypto.mk` 第 553 行 | `KCONFIG:=CONFIG_CRYPTO_LIB_CHACHA` |
+> | Linux v5.10 `lib/crypto/Makefile` | `obj-$(CONFIG_CRYPTO_LIB_CHACHA_GENERIC) += libchacha.o` ← **符号少了 `_GENERIC`** |
+>
+> 结果：WireGuard 依赖的 ChaCha20 内核模块在两个环节上都不匹配，无法产出 `.ko`。
+>
+> **为什么路线 A 不受影响**：openwrt-24.10 的 `crypto.mk` 中 mips32r2 分支**没有版本限定**，
+> `CPU_MIPS32_R2=y`（mt7620 = 24kc）时 `FILES` 被覆盖为 `arch/mips/crypto/chacha-mips.ko`，绕开了该符号。
+> 且 OpenWrt 官方 24.10.5 已发布 R1C release 镜像（实测 6528 KiB）。
+
+> 风险对冲：**锁定 commit**（`source.commit`），不追分支滚动更新。
 
 | 对比项 | **A：openwrt/openwrt `openwrt-24.10`** | **B：coolsnowwolf/lede `master`** |
 | --- | --- | --- |
@@ -74,7 +98,18 @@ suifeng009/openwrt
 | 维护风险 | 低：官方 release 有安全更新 | 中：lede master 对 mt7620 关注度逐年下降 |
 | 落地成本 | 中（需适配 diy 脚本） | 低（脚本现成） |
 
-### 2.1 路线 B 落地要点（实测自 lede master）
+### 2.1 路线 A 落地要点（实测自 openwrt-24.10 分支）
+
+| 项目 | 值 |
+| --- | --- |
+| 源码 | `git clone --depth 1 https://github.com/openwrt/openwrt.git -b openwrt-24.10` |
+| 内核 | `KERNEL_PATCHVER:=6.6` |
+| 设备定义 | `xiaomi_miwifi-mini` → `Image/Device` 定义一致；`IMAGE_SIZE` 15872k |
+| 交换机框架 | swconfig（`DEFAULT_PACKAGES` 含 `swconfig`） |
+| 已发布参考镜像 | 24.10.5 sysupgrade = 6528 KiB（实测 Content-Length） |
+| 需改造的 diy 脚本 | `diy-part1.sh` 里的 helloworld/OpenClash sed 在官方树为空操作（无害，保留作幂等保护） |
+
+### 2.0 路线 B 要点（⛔ 已废弃，保留作历史记录）
 
 | 项目 | 值 |
 | --- | --- |
@@ -342,7 +377,7 @@ git add . && git commit -m "r1c: xxx" && git push
 | --- | --- |
 | x86_64 + VMDK/ESXi 转换步骤 | ❌ 删除；改为 `ramips/mt7620` 产物 |
 | 仓库根 `.config` | `configs/r1c-gateway.config` |
-| 追 `lede master` 最新代码 | ✅ 锁定 `lede.commit`（可复现；可用 `force_unlock` 手动解除） |
+| 追分支最新代码 | ✅ 锁定 `source.commit`（可复现；可用 `force_unlock` 手动解除） |
 | 无体积检查 | ✅ `scripts/check-size.sh`，超 15 MiB 直接失败 |
 | 无 release 打包 | ✅ `scripts/make-release.sh`（sha256 / manifest / config.buildinfo） |
 | 删除旧 Release（保留 10） | ❌ 不删 —— 工业固件需可追溯归档 |

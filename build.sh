@@ -2,7 +2,10 @@
 # ==============================================================================
 # R1C Industrial Remote Gateway - 全量构建脚本
 #
-# 源码树 : coolsnowwolf/lede (路线 B，已决策)
+# 源码树 : openwrt/openwrt openwrt-24.10 (kernel 6.6)
+#          —— 由 Lean's lede 迁移，原因见 docs/BUILD.md §2（lede 5.10 的
+#             crypto.mk 存在CONFIG_CRYPTO_LIB_CHACHA_GENERIC 符号不匹配，
+#             导致 kmod-crypto-lib-chacha20 / WireGuard 无法构建，CI 已实证）
 # 设备   : ramips/mt7620 -> xiaomi_miwifi-mini (Xiaomi MiWiFi Mini / R1C)
 # 架构   : mipsel_24kc    Flash: 16MiB (firmware 分区 15872 KiB)
 #
@@ -16,7 +19,9 @@ set -e
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR"
 
-SRC_DIR="$BASE_DIR/lede"
+SRC_DIR="$BASE_DIR/openwrt"
+SRC_BRANCH="openwrt-24.10"
+COMMIT_FILE="$BASE_DIR/source.commit"
 PROFILE="r1c-gateway"
 export BUILD_VERSION="${BUILD_VERSION:-$(date +"%Y.%m.%d-%H%M")}"
 
@@ -40,20 +45,20 @@ if [ -f scripts/deps-ubuntu.sh ]; then
 fi
 
 # ---------------------------------------------------------------- 2. 获取源码
-log "[2/10] 获取 Lean's lede 源码"
+log "[2/10] 获取 OpenWrt 官方源码 ($SRC_BRANCH)"
 if [ ! -d "$SRC_DIR" ]; then
-    git clone https://github.com/coolsnowwolf/lede.git "$SRC_DIR"
+    git clone --depth 1 https://github.com/openwrt/openwrt.git -b "$SRC_BRANCH" "$SRC_DIR"
 else
-    ( cd "$SRC_DIR" && git reset --hard HEAD && git pull origin master )
+    ( cd "$SRC_DIR" && git fetch --depth 1 origin "$SRC_BRANCH" && git reset --hard FETCH_HEAD )
 fi
-# 锁定 commit：工业固件必须可复现，禁止追 master 滚动
-if [ -f "$BASE_DIR/lede.commit" ]; then
-    LOCKED=$(tr -d ' \t\r\n' < "$BASE_DIR/lede.commit")
-    [ -n "$LOCKED" ] && ( cd "$SRC_DIR" && git checkout -f "$LOCKED" ) \
+# 锁定 commit：工业固件必须可复现，禁止追分支滚动更新
+if [ -f "$COMMIT_FILE" ]; then
+    LOCKED=$(tr -d ' \t\r\n' < "$COMMIT_FILE")
+    [ -n "$LOCKED" ] && ( cd "$SRC_DIR" && git fetch --depth 1 origin "$LOCKED" && git checkout -f "$LOCKED" ) \
         && echo "✅ 已锁定源码 commit: $LOCKED"
 else
-    ( cd "$SRC_DIR" && git rev-parse HEAD > "$BASE_DIR/lede.commit" )
-    echo "⚠️  未找到 lede.commit，已记录当前 HEAD: $(cat "$BASE_DIR/lede.commit")"
+    ( cd "$SRC_DIR" && git rev-parse HEAD > "$COMMIT_FILE" )
+    echo "⚠️  未找到 source.commit，已记录当前 HEAD: $(cat "$COMMIT_FILE")"
 fi
 
 cd "$SRC_DIR"

@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       force_unlock:
-        description: '忽略 lede.commit 锁定，使用分支最新代码'
+        description: '忽略 source.commit 锁定，使用分支最新代码'
         type: boolean
         default: false
   push:
@@ -34,8 +34,8 @@ on:
       - '.github/workflows/build-r1c.yml'
 
 env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-24.10
   CONFIG_FILE: configs/r1c-gateway.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
@@ -101,14 +101,14 @@ jobs:
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        if [ "${{ inputs.force_unlock }}" != "true" ] && [ -f "$GITHUB_WORKSPACE/lede.commit" ]; then
-          LOCKED=$(tr -d ' \t\r\n' < "$GITHUB_WORKSPACE/lede.commit")
+        if [ "${{ inputs.force_unlock }}" != "true" ] && [ -f "$GITHUB_WORKSPACE/source.commit" ]; then
+          LOCKED=$(tr -d ' \t\r\n' < "$GITHUB_WORKSPACE/source.commit")
           git fetch --depth 1 origin "$LOCKED"
           git checkout -f "$LOCKED"
           echo "✅ 锁定 commit: $LOCKED"
         else
           echo "⚠️  未锁定，使用 $REPO_BRANCH 最新 HEAD: $(git rev-parse HEAD)"
-          git rev-parse HEAD > "$GITHUB_WORKSPACE/lede.commit"
+          git rev-parse HEAD > "$GITHUB_WORKSPACE/source.commit"
         fi
         ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
 
@@ -199,7 +199,7 @@ jobs:
         body: |
           Device: Xiaomi MiWiFi Mini (R1C)
           Target: ramips/mt7620 (mipsel_24kc)
-          Source: coolsnowwolf/lede @ ${{ github.sha }}
+          Source: openwrt/openwrt (openwrt-24.10) @ ${{ github.sha }}
         files: releases/r1c-gateway-${{ env.BUILD_VERSION }}/*
 
     # 注意：不删除历史 Release —— 工业固件需要可追溯的版本归档
