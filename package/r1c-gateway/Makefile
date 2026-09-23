@@ -37,6 +37,9 @@ define Build/Compile
 	true
 endef
 
+# ⚠️ 新增文件必须在此登记，否则不会被打进固件。
+#    曾漏登记 r1c-apply，导致构建成功但设备上看不到该工具（静默缺失，不报错）。
+#    files/ 目录由 diy-part2.d/10-r1c-gateway.sh 同步进包目录 ./files。
 define Package/r1c-gateway/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/r1c-gateway $(1)/etc/init.d/r1c-gateway
@@ -44,8 +47,12 @@ define Package/r1c-gateway/install
 	$(INSTALL_BIN) ./files/usr/bin/r1c-status $(1)/usr/bin/r1c-status
 	$(INSTALL_BIN) ./files/usr/bin/r1c-diagnose $(1)/usr/bin/r1c-diagnose
 	$(INSTALL_BIN) ./files/usr/bin/r1c-test-plc $(1)/usr/bin/r1c-test-plc
+	$(INSTALL_BIN) ./files/usr/bin/r1c-apply $(1)/usr/bin/r1c-apply
 	$(INSTALL_DIR) $(1)/etc/r1c
 	$(INSTALL_CONF) ./files/etc/r1c/site.conf $(1)/etc/r1c/site.conf
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/etc/uci-defaults/90-r1c-wireless-sta.sh \
+		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
 endef
 
 define Package/r1c-gateway/postinst
