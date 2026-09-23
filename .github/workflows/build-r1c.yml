@@ -172,9 +172,45 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
         df -hT /workdir
 
+    # 防呆：曾经发生过「构建成功但自研工具不在固件里」的静默缺失——
+    # 包被选中、编译通过，却因 install 段漏登记文件而丢失，不报错、极难发现。
+    # 这里在打包前直接对着 rootfs 逐个点名，缺一个就让构建失败。
+    - name: Verify r1c-gateway files landed in rootfs
+      id: verifyfiles
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        cd openwrt
+        ROOTFS=$(ls -d build_dir/target-*/root-ramips 2>/dev/null | head -1)
+        if [ -z "$ROOTFS" ]; then
+          echo "❌ 未找到 rootfs 目录"; exit 1
+        fi
+        echo "rootfs: $ROOTFS"
+        MISSING=0
+        for f in \
+          usr/bin/r1c-apply \
+          usr/bin/r1c-status \
+          usr/bin/r1c-diagnose \
+          usr/bin/r1c-test-plc \
+          etc/init.d/r1c-gateway \
+          etc/r1c/site.conf \
+          etc/uci-defaults/90-r1c-wireless-sta.sh
+        do
+          if [ -e "$ROOTFS/$f" ]; then
+            echo "  ✅ $f"
+          else
+            echo "  ❌ 缺失 $f  —— 检查 package/r1c-gateway/Makefile 的 install 段是否登记"
+            MISSING=$((MISSING+1))
+          fi
+        done
+        if [ "$MISSING" -ne 0 ]; then
+          echo "::error::rootfs 缺少 $MISSING 个 r1c 文件，中止发布"
+          exit 1
+        fi
+        echo "status=success" >> $GITHUB_OUTPUT
+
     - name: Firmware size check (需求 §44)
       id: sizecheck
-      if: steps.compile.outputs.status == 'success'
+      if: steps.verifyfiles.outputs.status == 'success'
       run: |
         cd openwrt
         BIN=$(ls bin/targets/ramips/mt7620/*miwifi-mini*squashfs-sysupgrade.bin 2>/dev/null | head -1)

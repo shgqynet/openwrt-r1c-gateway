@@ -93,8 +93,11 @@ case "${PLC_ROLE:-gateway}" in
         ;;
     host)
         valid_ip "${PLC_LOCAL_IP:-}" || { echo "  ✗ host 模式下 PLC_LOCAL_IP 非法: ${PLC_LOCAL_IP:-<空>}"; ERRS=$((ERRS+1)); }
-        # host 模式下回包要走现场原网关，没有它工程师侧收不到响应
-        [ -n "${PLC_UPSTREAM_GW:-}" ] || warn "host 模式未设置 PLC_UPSTREAM_GW，PLC 回包可能无法返回（可改用 gateway 模式或开启 PLC_SNAT）"
+        [ -n "${PLC_SNAT:-auto}" ] || true
+        case "${PLC_SNAT:-auto}" in
+            auto|1) ;;
+            0) warn "host 模式且 PLC_SNAT=0：需确保现场网关有回程路由到 VPN 网段，否则 PLC 回包无法到达工程师" ;;
+        esac
         ;;
     *) echo "  ✗ PLC_ROLE 必须是 gateway 或 host: ${PLC_ROLE}"; ERRS=$((ERRS+1)) ;;
 esac
@@ -129,10 +132,21 @@ fi
 NETMASK=$(cidr_to_mask "${PLC_NETWORK}") \
     || die "无法从 PLC_NETWORK 推导掩码: ${PLC_NETWORK}"
 
+# ⚠️ 两种角色都**不设置** LAN 的默认网关 —— 这是刻意的设计：
+#   R1C 的默认路由必须始终指向 WAN（4G / 手机热点），否则 VPN 隧道自身的
+#   出站流量会走错接口，隧道立刻中断。host 模式下若给 lan 配置 gateway，
+#   会产出第二条默认路由与其竞争，是本工具最容易踩的坑。
+#
+#   PLC 侧通信不需要网关：
+#     gateway 模式 —— R1C 本身就是 PLC 网段网关，同网段直连路由天然存在
+#     host   模式 —— R1C 与 PLC 同处一个二层网段，同样是直连路由
+#   若现场 PLC 位于**跨三层**的远端网段（非直连），才需要额外静态路由，
+#   届时应手动添加 route 段，不要用 gateway 顶替。
 case "${PLC_ROLE}" in
-    gateway) LAN_IP="${PLC_GATEWAY}"; LAN_GW="" ;;
-    host)    LAN_IP="${PLC_LOCAL_IP}"; LAN_GW="${PLC_UPSTREAM_GW}" ;;
+    gateway) LAN_IP="${PLC_GATEWAY}" ;;
+    host)    LAN_IP="${PLC_LOCAL_IP}" ;;
 esac
+LAN_GW=""
 
 # SNAT 决策：host 模式下 PLC 的网关不是 R1C，回包会走现场原网关，
 # 而原网关通常没有到 VPN 网段的路由 —— 必须做源地址转换。
@@ -189,7 +203,12 @@ EOF
     emit set network.${VPN_IFACE}.proto='wireguard'
     emit set network.${VPN_IFACE}.addresses="${VPN_ADDR}"
     if [ -f "${WG_PRIVATE_KEY_FILE:-}" ]; then
-        emit set network.${VPN_IFACE}.private_key="$(cat "${WG_PRIVATE_KEY_FILE}")"
+        # dry-run 下不得回显私钥：这种输出常被粘到工单 / 聊天记录里
+        if [ "$MODE" = "dryrun" ]; then
+            echo "  uci set network.${VPN_IFACE}.private_key=<读取自 ${WG_PRIVATE_KEY_FILE}>"
+        else
+            emit set network.${VPN_IFACE}.private_key="$(cat "${WG_PRIVATE_KEY_FILE}")"
+        fi
     else
         warn "跳过私钥（文件不存在）: ${WG_PRIVATE_KEY_FILE}"
     fi
@@ -212,6 +231,36 @@ fi
 
 echo
 echo "[3/4] 防火墙 PLC Zone（需求 §20）"
+
+# OpenWrt 默认配置已存在一个绑定 lan 接口的 zone（name='lan'），且自带
+# lan → wan 的 forwarding。若在此基础上再新建一个同样绑定 lan 的 plc zone，
+# 一个接口就会同时归属两个 zone，fw4 规则生成结果不可预期 ——
+# 典型症状：默认 lan→wan 转发仍然生效，PLC 得以访问 Internet，违反需求 §20
+# 「Internet → PLC / PLC → WAN 默认禁止」。因此先把冲突段清理掉。
+cleanup_default_lan() {
+    local sec sid
+    local victims=""
+    for sid in $(uci -q show firewall 2>/dev/null \
+                 | grep '\.network=' | grep -w 'lan' \
+                 | sed 's/^firewall\.\([^.=]*\)\..*/\1/'); do
+        [ "$sid" = "plc" ] && continue
+        victims="$victims $sid"
+    done
+    # forwarding 的 src/dest 引用的是 zone name，删掉 lan zone 后这些段失去意义
+    for sid in $(uci -q show firewall 2>/dev/null \
+                 | grep -E "\.(src|dest)='lan'$" \
+                 | sed 's/^firewall\.\([^.=]*\)\..*/\1/'); do
+        victims="$victims $sid"
+    done
+    for sec in $victims; do
+        [ -n "$sec" ] || continue
+        emit -q delete "firewall.$sec"
+    done
+    [ -n "$victims" ] && info "已清理默认 lan zone 段:$victims（避免与 plc zone 冲突）"
+    return 0
+}
+cleanup_default_lan
+
 # PLC 侧就是 lan 接口
 emit set firewall.plc=zone
 emit set firewall.plc.name='plc'
