@@ -1,0 +1,280 @@
+#!/bin/sh
+# ==============================================================================
+# r1c-apply — 把 /etc/r1c/site.conf 应用到实际网络配置（需求 §27 / §20）
+#
+# 设计动机：现场 PLC 网段不固定、VPN 网段也常要改，
+#   因此这些参数**不编译进固件**，运行时改 site.conf 后执行本工具即可生效，
+#   无需重新编译、无需重启整机。
+#
+# 用法:
+#   r1c-apply           校验并把配置写入 UCI 后 reload 网络/防火墙
+#   r1c-apply --check   只校验不改动（部署前自检）
+#   r1c-apply --dry-run 只打印将要执行的 UCI 变更，不提交
+#
+# 覆盖范围:
+#   1. LAN/PLC 侧地址（按 PLC_ROLE=gateway|host 两种角色）
+#   2. WireGuard / ZeroTier 接口
+#   3. 防火墙 PLC Zone 与转发规则（§20）
+#   4. PLC → WAN 的访问策略、VPN→PLC 的 SNAT 策略
+#
+# 安全红线:
+#   - 私钥只从 WG_PRIVATE_KEY_FILE 指向的文件读取，不写在 site.conf 里
+#   - 本工具不执行任何 mtd / sysupgrade / U-Boot 操作（需求 §64）
+# ==============================================================================
+
+CONF="/etc/r1c/site.conf"
+MODE="apply"
+
+case "${1:-}" in
+    --check)   MODE="check" ;;
+    --dry-run) MODE="dryrun" ;;
+    "" )       MODE="apply" ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "未知参数: $1（支持 --check / --dry-run）" >&2; exit 2 ;;
+esac
+
+# ---------------------------------------------------------------- 基础工具
+die() { echo "❌ $*" >&2; exit 1; }
+warn() { echo "⚠️  $*"; }
+info() { echo "   $*"; }
+ok()   { echo "✅ $*"; }
+
+# CIDR 前缀 -> 点分十进制掩码。busybox ash 算术即可，避免依赖 ipcalc。
+cidr_to_mask() {
+    local bits="${1#*/}" full=4294967295 mask
+    [ "$bits" -ge 0 ] 2>/dev/null && [ "$bits" -le 32 ] 2>/dev/null || return 1
+    mask=$(( (full << (32 - bits)) & full ))
+    printf "%d.%d.%d.%d" \
+        $(( (mask >> 24) & 255 )) $(( (mask >> 16) & 255 )) \
+        $(( (mask >> 8) & 255 )) $(( mask & 255 ))
+}
+
+valid_ip() {
+    local ip="$1" IFS=. p n=0
+    case "$ip" in *.*.*.*) ;; *) return 1 ;; esac
+    for p in $ip; do
+        n=$((n + 1))
+        [ "$n" -le 4 ] || return 1
+        case "$p" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$p" -ge 0 ] 2>/dev/null && [ "$p" -le 255 ] 2>/dev/null || return 1
+    done
+    [ "$n" -eq 4 ]
+}
+
+valid_cidr() {
+    local net="${1%%/*}" bits="${1#*/}"
+    [ "$1" = "${net}/${bits}" ] || return 1
+    valid_ip "$net" || return 1
+    case "$bits" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$bits" -ge 0 ] 2>/dev/null && [ "$bits" -le 32 ] 2>/dev/null || return 1
+}
+
+# ---------------------------------------------------------------- 载入并校验
+[ -f "$CONF" ] || die "未找到 $CONF"
+# shellcheck disable=SC1090
+. "$CONF"
+
+echo "=============================================="
+echo " r1c-apply — 应用现场配置"
+echo " Site: ${SITE_ID:-UNSET}   Mode: $MODE"
+echo "=============================================="
+
+ERRS=0
+
+# --- 必填项 ---
+[ -n "${SITE_ID:-}" ] || { echo "  ✗ SITE_ID 未设置"; ERRS=$((ERRS+1)); }
+[ "${SITE_ID:-}" != "SITE000" ] || warn "SITE_ID 仍是占位值 SITE000"
+
+valid_cidr "${PLC_NETWORK:-}" || { echo "  ✗ PLC_NETWORK 非法: ${PLC_NETWORK:-<空>}"; ERRS=$((ERRS+1)); }
+
+case "${PLC_ROLE:-gateway}" in
+    gateway)
+        valid_ip "${PLC_GATEWAY:-}" || { echo "  ✗ gateway 模式下 PLC_GATEWAY 非法: ${PLC_GATEWAY:-<空>}"; ERRS=$((ERRS+1)); }
+        ;;
+    host)
+        valid_ip "${PLC_LOCAL_IP:-}" || { echo "  ✗ host 模式下 PLC_LOCAL_IP 非法: ${PLC_LOCAL_IP:-<空>}"; ERRS=$((ERRS+1)); }
+        # host 模式下回包要走现场原网关，没有它工程师侧收不到响应
+        [ -n "${PLC_UPSTREAM_GW:-}" ] || warn "host 模式未设置 PLC_UPSTREAM_GW，PLC 回包可能无法返回（可改用 gateway 模式或开启 PLC_SNAT）"
+        ;;
+    *) echo "  ✗ PLC_ROLE 必须是 gateway 或 host: ${PLC_ROLE}"; ERRS=$((ERRS+1)) ;;
+esac
+
+# --- VPN ---
+case "${VPN_MODE:-wireguard}" in
+    wireguard)
+        valid_cidr "${VPN_ADDR:-}" || { echo "  ✗ VPN_ADDR 非法: ${VPN_ADDR:-<空>}"; ERRS=$((ERRS+1)); }
+        [ -n "${WG_ENDPOINT:-}" ] || warn "WG_ENDPOINT 为空，WireGuard 无法建立连接（Hub 地址未配置）"
+        [ -n "${WG_PEER_PUBLIC_KEY:-}" ] || warn "WG_PEER_PUBLIC_KEY 为空，WireGuard 无法建立连接"
+        if [ -z "${WG_PRIVATE_KEY_FILE:-}" ]; then
+            echo "  ✗ WG_PRIVATE_KEY_FILE 未设置"; ERRS=$((ERRS+1))
+        elif [ ! -f "${WG_PRIVATE_KEY_FILE}" ]; then
+            warn "私钥文件不存在: ${WG_PRIVATE_KEY_FILE}（现场部署时需写入，勿提交进仓库）"
+        fi
+        ;;
+    zerotier)
+        [ -n "${ZT_NETWORK:-}" ] || warn "ZeroTier 模式未设置 ZT_NETWORK"
+        ;;
+    *) echo "  ✗ VPN_MODE 必须是 wireguard 或 zerotier: ${VPN_MODE}"; ERRS=$((ERRS+1)) ;;
+esac
+
+case "${PLC_WAN_ACCESS:-deny}" in deny|allow) ;; *) echo "  ✗ PLC_WAN_ACCESS 必须是 deny 或 allow"; ERRS=$((ERRS+1)) ;; esac
+case "${PLC_SNAT:-auto}" in auto|0|1) ;; *) echo "  ✗ PLC_SNAT 必须是 auto / 0 / 1"; ERRS=$((ERRS+1)) ;; esac
+
+if [ "$ERRS" -gt 0 ]; then
+    die "配置校验失败（$ERRS 项），未做任何改动。请修正 $CONF 后重试。"
+fi
+[ "$MODE" = "check" ] && { ok "配置校验通过（未应用）"; exit 0; }
+
+# ---------------------------------------------------------------- 生成变更
+NETMASK=$(cidr_to_mask "${PLC_NETWORK}") \
+    || die "无法从 PLC_NETWORK 推导掩码: ${PLC_NETWORK}"
+
+case "${PLC_ROLE}" in
+    gateway) LAN_IP="${PLC_GATEWAY}"; LAN_GW="" ;;
+    host)    LAN_IP="${PLC_LOCAL_IP}"; LAN_GW="${PLC_UPSTREAM_GW}" ;;
+esac
+
+# SNAT 决策：host 模式下 PLC 的网关不是 R1C，回包会走现场原网关，
+# 而原网关通常没有到 VPN 网段的路由 —— 必须做源地址转换。
+case "${PLC_SNAT}" in
+    auto) [ "${PLC_ROLE}" = "host" ] && DO_SNAT=1 || DO_SNAT=0 ;;
+    *)    DO_SNAT="${PLC_SNAT}" ;;
+esac
+
+VPN_IFACE="wg0"
+[ "${VPN_MODE}" = "zerotier" ] && VPN_IFACE="zt0"
+
+emit() { # emit <uci 命令...>
+    if [ "$MODE" = "dryrun" ]; then
+        echo "  uci $*"
+    else
+        uci "$@" || warn "uci $* 执行失败"
+    fi
+}
+
+echo
+echo "[1/4] LAN / PLC 侧接口（角色: ${PLC_ROLE}）"
+info "ipaddr=${LAN_IP} netmask=${NETMASK}${LAN_GW:+ gateway=${LAN_GW}}"
+emit set network.lan.ipaddr="${LAN_IP}"
+emit set network.lan.netmask="${NETMASK}"
+if [ -n "${LAN_GW}" ]; then
+    emit set network.lan.gateway="${LAN_GW}"
+else
+    emit -q delete network.lan.gateway
+fi
+
+echo
+echo "[2/4] VPN 接口（${VPN_MODE} → ${VPN_IFACE}）"
+if [ "${VPN_MODE}" = "wireguard" ]; then
+    # 走隧道的目标网段：未显式配置则取 VPN_ADDR 的网络部分对应的 /16 等，
+    # 这里直接用 VPN_ADDR 的前缀长度推导网段，保证工程师侧可达。
+    if [ -n "${WG_PEER_ALLOWED_IPS:-}" ]; then
+        TUNNEL_NETS="${WG_PEER_ALLOWED_IPS}"
+    else
+        # 10.250.1.20/16 -> 10.250.0.0/16
+        # 用 read 分词而非 set --，避免污染脚本位置参数
+        _ip="${VPN_ADDR%%/*}"; _bits="${VPN_ADDR##*/}"
+        IFS=. read -r _o1 _o2 _o3 _o4 <<EOF
+$_ip
+EOF
+        case "$_bits" in
+            8)  TUNNEL_NETS="$_o1.0.0.0/8" ;;
+            16) TUNNEL_NETS="$_o1.$_o2.0.0/16" ;;
+            24) TUNNEL_NETS="$_o1.$_o2.$_o3.0/24" ;;
+            *)  TUNNEL_NETS="0.0.0.0/0" ;;
+        esac
+    fi
+    info "隧道地址=${VPN_ADDR}  走隧道路由=${TUNNEL_NETS}"
+    emit set network.${VPN_IFACE}=interface
+    emit set network.${VPN_IFACE}.proto='wireguard'
+    emit set network.${VPN_IFACE}.addresses="${VPN_ADDR}"
+    if [ -f "${WG_PRIVATE_KEY_FILE:-}" ]; then
+        emit set network.${VPN_IFACE}.private_key="$(cat "${WG_PRIVATE_KEY_FILE}")"
+    else
+        warn "跳过私钥（文件不存在）: ${WG_PRIVATE_KEY_FILE}"
+    fi
+    # peer 段
+    emit set network.wg_peer=wireguard_${VPN_IFACE}
+    emit set network.wg_peer.public_key="${WG_PEER_PUBLIC_KEY}"
+    emit set network.wg_peer.allowed_ips="${TUNNEL_NETS}"
+    emit set network.wg_peer.route_allowed_ips='1'
+    emit set network.wg_peer.persistent_keepalive="${WG_KEEPALIVE:-25}"
+    if [ -n "${WG_ENDPOINT:-}" ]; then
+        emit set network.wg_peer.endpoint_host="${WG_ENDPOINT%%:*}"
+        emit set network.wg_peer.endpoint_port="${WG_ENDPOINT##*:}"
+    fi
+else
+    info "ZeroTier network=${ZT_NETWORK}  通告路由=${ZT_ROUTE:-${PLC_NETWORK}}"
+    emit set zerotier.r1c=zerotier
+    emit set zerotier.r1c.enabled='1'
+    emit set zerotier.r1c.network="${ZT_NETWORK}"
+fi
+
+echo
+echo "[3/4] 防火墙 PLC Zone（需求 §20）"
+# PLC 侧就是 lan 接口
+emit set firewall.plc=zone
+emit set firewall.plc.name='plc'
+emit set firewall.plc.network='lan'
+emit set firewall.plc.input='ACCEPT'
+emit set firewall.plc.output='ACCEPT'
+emit set firewall.plc.forward='REJECT'
+
+# VPN zone：默认拒绝从 VPN 访问路由器自身（§62：WAN 禁止管理，VPN 侧按管理员授权另开）
+emit set firewall.vpn=zone
+emit set firewall.vpn.name='vpn'
+emit set firewall.vpn.network="${VPN_IFACE}"
+emit set firewall.vpn.input='REJECT'
+emit set firewall.vpn.output='ACCEPT'
+emit set firewall.vpn.forward='REJECT'
+
+# VPN -> PLC: ALLOW（§20）
+emit set firewall.vpn2plc=forwarding
+emit set firewall.vpn2plc.src='vpn'
+emit set firewall.vpn2plc.dest='plc'
+
+# PLC -> WAN: 按现场要求（默认 deny，§20）
+emit set firewall.plc2wan=forwarding
+emit set firewall.plc2wan.src='plc'
+emit set firewall.plc2wan.dest='wan'
+if [ "${PLC_WAN_ACCESS}" = "allow" ]; then
+    emit set firewall.plc2wan.target='ACCEPT'
+else
+    emit set firewall.plc2wan.target='REJECT'
+fi
+
+echo
+echo "[4/4] SNAT 策略（PLC_SNAT=${PLC_SNAT} → 实际 ${DO_SNAT}）"
+if [ "$DO_SNAT" = "1" ]; then
+    info "对 VPN→PLC 流量做源地址转换（host 模式下保证 PLC 回包经过 R1C）"
+    emit set firewall.plc_snat=nat
+    emit set firewall.plc_snat.name='plc-snat'
+    emit set firewall.plc_snat.src='vpn'
+    emit set firewall.plc_snat.dest_ip="${PLC_NETWORK}"
+    emit set firewall.plc_snat.target='MASQUERADE'
+else
+    info "不做 SNAT（gateway 模式下 PLC 网关即 R1C，回包天然经过本设备）"
+    emit -q delete firewall.plc_snat
+fi
+
+echo
+if [ "$MODE" = "dryrun" ]; then
+    ok "dry-run 结束，未提交任何变更"
+    exit 0
+fi
+
+uci commit network
+uci commit firewall
+[ "${VPN_MODE}" = "zerotier" ] && uci commit zerotier
+
+# 生效：重载网络与防火墙，不重启整机（需求 §37：禁止无条件重启路由器）
+/etc/init.d/firewall reload >/dev/null 2>&1 || warn "firewall reload 失败"
+if [ "${VPN_MODE}" = "wireguard" ] && [ -f "${WG_PRIVATE_KEY_FILE:-}" ] && [ -n "${WG_ENDPOINT:-}" ]; then
+    ifup "${VPN_IFACE}" >/dev/null 2>&1 || warn "ifup ${VPN_IFACE} 失败"
+fi
+# LAN 地址变更需要重启 lan 接口才生效
+ifup lan >/dev/null 2>&1 || warn "ifup lan 失败"
+
+ok "配置已应用。可用 r1c-status / r1c-diagnose 验证。"
+echo "   提示：若刚改过 PLC 网段，请确认 PLC_DEVICES 里的 IP 也已同步更新。"
+exit 0

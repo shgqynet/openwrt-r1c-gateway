@@ -54,11 +54,12 @@ say "[6] PLC Gateway (${PLC_GATEWAY:-UNSET})"
 say ""
 
 say "[7] PLC TCP ports (只做连通性，不发送任何工业协议命令)"
-for entry in ${PLC_DEVICES:-}; do
-    name=$(echo "$entry" | cut -d'|' -f1)
-    ip=$(echo "$entry"   | cut -d'|' -f2)
-    type=$(echo "$entry" | cut -d'|' -f3)
-    case "$type" in
+# PLC_DEVICES 是换行分隔的字符串（不是数组，ash 不支持数组）。
+# 必须逐行读：描述字段含空格，用 for 的 word splitting 会被拆碎。
+echo "${PLC_DEVICES:-}" | while IFS='|' read -r name ip type desc; do
+    [ -n "${name:-}" ] || continue
+    case "$name" in '#'*) continue ;; esac
+    case "${type:-}" in
         s7) port=102 ;;
         ab) port=44818 ;;
         *)  port=80 ;;

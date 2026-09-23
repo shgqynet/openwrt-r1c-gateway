@@ -11,8 +11,17 @@ echo " Xiaomi R1C — Industrial Remote Gateway"
 echo "=============================================="
 echo "Site ID        ${SITE_ID:-UNSET}"
 echo "Hostname       $(cat /proc/sys/kernel/hostname)"
-echo "PLC Network    ${PLC_NETWORK:-UNSET}  (gw ${PLC_GATEWAY:-UNSET})"
-echo "VPN Mode       ${VPN_MODE:-UNSET}"
+
+# PLC 侧：显示角色，以及"实际生效"的地址（可能与 site.conf 不同，便于发现未 apply）
+echo "PLC Network    ${PLC_NETWORK:-UNSET}  (role ${PLC_ROLE:-gateway})"
+case "${PLC_ROLE:-gateway}" in
+    host) echo "PLC Local IP   ${PLC_LOCAL_IP:-UNSET}  (upstream gw ${PLC_UPSTREAM_GW:-UNSET})" ;;
+    *)    echo "PLC Gateway    ${PLC_GATEWAY:-UNSET}" ;;
+esac
+_lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
+[ -n "${_lan_ip:-}" ] && echo "LAN (applied)  ${_lan_ip}  <- 实际生效，应与上面一致"
+
+echo "VPN Mode       ${VPN_MODE:-UNSET}  (${VPN_ADDR:-UNSET})"
 echo "Uptime         $(uptime | sed 's/^.*up //; s/,.*//')"
 echo
 

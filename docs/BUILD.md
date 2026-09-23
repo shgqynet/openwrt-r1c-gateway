@@ -109,6 +109,26 @@ suifeng009/openwrt
 | 已发布参考镜像 | 24.10.5 sysupgrade = 6528 KiB（实测 Content-Length） |
 | 需改造的 diy 脚本 | `diy-part1.sh` 里的 helloworld/OpenClash sed 在官方树为空操作（无害，保留作幂等保护） |
 
+### 2.1.1 组件选型决策记录
+
+| 组件 | 决策 | 依据 | 日期 |
+| --- | --- | --- | --- |
+| VPN 主方案 | WireGuard（必装）+ ZeroTier（可选备用） | `docs/VPN-COMPATIBILITY.md` 实测 | 2026-09-23 |
+| Tailscale | 不入固件（EXPERIMENTAL） | installed 24.9 MiB > Flash 预算 | 2026-09-23 |
+| Cloudflare / cloudflared | NOT SUPPORTED ON R1C | 25.9 MiB + WARP 不转发 ICMP | 2026-09-23 |
+| **无线认证 | WPA2（`wpad-basic-mbedtls`），**不用 WPA3** | 见下方说明 | 2026-09-23（用户确认） |
+
+**WPA3 决策说明**
+
+需求 §12 提到"WPA3（驱动支持时）"，经用户确认**不予采用**：
+
+- 现场场景为普通手机热点，WPA2-PSK 的安全强度已足够
+- 启用 WPA3 需换用 `wpad-openssl`，引入 `libopenssl` 依赖树并增加 Flash 占用
+- 收益与代价不匹配，违反 §43「不要为了功能数量安装大型软件」与 §72 优先级（稳定性优先）
+
+生产提示：作为 STA 连接手机热点时，`wpad-basic-mbedtls` 支持 WPA2-PSK（`psk2`）。
+若将来确有 WPA3 需求，需先按 §43/§44 重算 Flash 预算再改选。
+
 ### 2.0 路线 B 要点（⛔ 已废弃，保留作历史记录）
 
 | 项目 | 值 |

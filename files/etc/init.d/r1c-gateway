@@ -29,6 +29,20 @@ boot() {
 start_service() {
     [ -f "$CONF" ] && . "$CONF" || { logger -t "$LOG_TAG" "[SYSTEM] site.conf missing"; return 1; }
 
+    # 启动时按 site.conf 应用网络配置（需求 §27）。
+    # 现场 PLC/VPN 网段不固定，配置必须在运行时生效而非编译进固件。
+    # 只在校验通过时才应用，避免残缺配置把网络改坏；AUTO_APPLY=0 可关闭。
+    if [ "${AUTO_APPLY:-1}" = "1" ] && [ -x /usr/bin/r1c-apply ]; then
+        if /usr/bin/r1c-apply --check >/dev/null 2>&1; then
+            log_msg SYSTEM "auto-apply site.conf (role=${PLC_ROLE:-gateway} net=${PLC_NETWORK:-UNSET})"
+            /usr/bin/r1c-apply >/dev/null 2>&1 \
+                && log_msg SYSTEM "auto-apply 成功" \
+                || log_msg SYSTEM "auto-apply 失败，保留现有网络配置"
+        else
+            log_msg SYSTEM "site.conf 校验未通过，跳过 auto-apply（保留现有网络配置）"
+        fi
+    fi
+
     procd_open_instance
     procd_set_param command /bin/sh -c '
         . /etc/r1c/site.conf
