@@ -83,7 +83,13 @@ ERRS=0
 
 # --- 必填项 ---
 [ -n "${SITE_ID:-}" ] || { echo "  ✗ SITE_ID 未设置"; ERRS=$((ERRS+1)); }
-[ "${SITE_ID:-}" != "SITE000" ] || warn "SITE_ID 仍是占位值 SITE000"
+# 占位值必须**阻断**应用，不能只 warn：
+# SITE_ID 还是 SITE000 就说明 site.conf 没按现场填过，此时应用会把 LAN 改成
+# 示例网段、还会建出一个没有端点的 WireGuard 接口，网络行为变得莫名其妙。
+if [ "${SITE_ID:-}" = "SITE000" ]; then
+    echo "  ✗ SITE_ID 仍是出厂占位值 SITE000，拒绝应用；请先按现场填写 $CONF"
+    ERRS=$((ERRS+1))
+fi
 
 valid_cidr "${PLC_NETWORK:-}" || { echo "  ✗ PLC_NETWORK 非法: ${PLC_NETWORK:-<空>}"; ERRS=$((ERRS+1)); }
 
