@@ -1,8 +1,18 @@
 # 首次装机与验证（breed 路线）
 
 > 适用：已刷入 **breed**（`breed-mt7620-xiaomi-mini.bin`）并完成备份的 R1C。
-> 本文所有命令**由你在设备上/电脑上手写执行**。本项目红线（需求 §64）禁止
-> 自动化执行 `mtd write` / `sysupgrade`，本文档不提供任何一键刷机脚本。
+
+## 谁来执行（已确认的分工）
+
+| 阶段 | 执行者 | 原因 |
+| --- | --- | --- |
+| breed 界面刷入 `initramfs-kernel.bin` | **你** | 此刻设备上没有系统，不存在 SSH，只能在 Web 页面点（唯一一次） |
+| 验收采集、固化 `sysupgrade`、排障 | **助手（SSH 敲命令）** | 你提供通道后，命令由助手执行并实时判读 |
+| 写 `factory` / `Bdata` / `u-boot` | **谁都不许** | 红线（需求 §64 / §68），永远不做 |
+
+助手侧使用 `scripts/flash-over-ssh.sh`：
+`probe` / `verify` 只读；`flash` **默认 dry-run，必须显式 `--apply` 才真正写入**，
+且只调用 `sysupgrade`（仅写 firmware 分区），脚本内不含任何 `mtd write`。
 
 ---
 
@@ -75,10 +85,44 @@
 
 ---
 
+## 2.5 建立 SSH 通道（你需要做的最后一步）
+
+initramfs 起来后，SSH 通道就通了，之后全部交给助手：
+
+1. 电脑网口接路由器 **LAN 口**
+2. 电脑 IP 设为静态 `192.168.1.2 / 255.255.255.0`
+   （LAN 侧地址是 `192.168.1.1`；initramfs 的 DHCP 不一定开，静态最稳）
+3. 回一句「可以了」
+
+助手会先跑只读探测：
+
+```sh
+./scripts/flash-over-ssh.sh probe
+```
+
+连不上时按这张表排查：
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| `无法 SSH 到 192.168.1.1` | 网线是否在 LAN 口；本机 IP 是否 192.168.1.x/24 |
+| 能 ping 通但 SSH 拒绝 | 设备还在启动，等 30s 重试 |
+| IP 冲突（电脑上不了网） | breed 也是 192.168.1.1，先断开 breed 会话 |
+| 拿到的是 192.168.10.x | 刷的是旧版固件（占位配置自动生效），见第 5 节 |
+
+---
+
 ## 3. 起来之后：Phase 2 验证清单（需求 §55）
 
 默认 LAN 地址为 **192.168.1.1**（出厂 `AUTO_APPLY=0`，不会改地址）。
 首次登录 LuCI 无密码，按提示设置一个。
+
+助手执行：
+
+```sh
+./scripts/flash-over-ssh.sh verify
+```
+
+等价的手工命令如下（想自己核对时可用）：
 
 ### 3.1 基础网络
 
@@ -143,14 +187,26 @@ r1c-apply --check
 
 验证全部通过后，才做这一步。两种方式：
 
-**A. 在跑起来的 OpenWrt 里 sysupgrade（推荐）**
+**A. 在跑起来的 OpenWrt 里 sysupgrade（推荐，助手执行）**
+
+助手在电脑上执行，先 dry-run 看清单，确认后再 `--apply`：
 
 ```sh
-sysupgrade -n /tmp/r1c-gateway-*-sysupgrade.bin
+# 第一步：只打印将要做什么，不动设备
+./scripts/flash-over-ssh.sh flash --image ./out/r1c-gateway-*-sysupgrade.bin
+
+# 第二步：确认无误后真正写入
+./scripts/flash-over-ssh.sh flash --image ./out/r1c-gateway-*-sysupgrade.bin --apply
 ```
+
+脚本内部流程：上传 → **两端 sha256 比对，不一致立即中止** →
+`sysupgrade -n` → 等重启上线 → 回读版本与工具清单。
 
 `-n` 表示不保留配置。首次装机建议加 `-n`，避免 initramfs 期间产生的
 临时配置被带进固化系统。
+
+> sysupgrade 只写 `firmware` 分区。若板型校验不通过它会自行拒绝，
+> **此时不要加 `-F` 强刷** —— 先回 breed 核对 0.1 的布局选项。
 
 **B. 回 breed 刷 sysupgrade**
 
