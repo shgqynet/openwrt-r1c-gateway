@@ -53,6 +53,8 @@ define Package/r1c-gateway/install
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/etc/uci-defaults/90-r1c-wireless-sta.sh \
 		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
+	$(INSTALL_BIN) ./files/etc/uci-defaults/91-r1c-luci-lang.sh \
+		$(1)/etc/uci-defaults/91-r1c-luci-lang.sh
 endef
 
 define Package/r1c-gateway/postinst
