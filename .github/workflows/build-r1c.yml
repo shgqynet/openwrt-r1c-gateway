@@ -206,6 +206,30 @@ jobs:
           echo "::error::rootfs 缺少 $MISSING 个 r1c 文件，中止发布"
           exit 1
         fi
+        # ⚠️ 存在 ≠ 可用。脚本没有执行位时，构建全绿但真机
+        #   ash: r1c-apply: Permission denied (exit 126)
+        # 2026-10-06 真机踩到：rootfs overlay 覆盖了 package install 的 0755。
+        echo "--- 可执行位检查 ---"
+        PERMFAIL=0
+        for f in \
+          usr/bin/r1c-apply \
+          usr/bin/r1c-status \
+          usr/bin/r1c-diagnose \
+          usr/bin/r1c-test-plc \
+          etc/init.d/r1c-gateway \
+          etc/uci-defaults/90-r1c-wireless-sta.sh
+        do
+          if [ -x "$ROOTFS/$f" ]; then
+            echo "  ✅ -x $f"
+          else
+            echo "  ❌ 无执行位 $f (mode $(stat -c%a "$ROOTFS/$f" 2>/dev/null))"
+            PERMFAIL=$((PERMFAIL+1))
+          fi
+        done
+        if [ "$PERMFAIL" -ne 0 ]; then
+          echo "::error::$PERMFAIL 个脚本缺少执行位，真机会 Permission denied，中止发布"
+          exit 1
+        fi
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Firmware size check (需求 §44)

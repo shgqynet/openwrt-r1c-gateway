@@ -34,7 +34,17 @@ echo "[r1c] 注入 files/ 到 rootfs overlay"
 if [ -d "$REPO_SRC/files" ]; then
     mkdir -p files
     cp -r "$REPO_SRC/files/." files/
-    echo "  -> files overlay 已合并"
+    # ⚠️ 必须显式补执行位（真机踩坑，2026-10-06）：
+    # overlay 是在镜像构建末期复制的，会**覆盖** package install 装好的 0755。
+    # 若仓库 checkout 时 core.filemode=false（Windows 常见），源文件的 +x 会丢失，
+    # 结果固件里 /usr/bin/r1c-* 变成 0644，真机上一跑就是
+    #   ash: r1c-apply: Permission denied (exit 126)
+    # 而 uci-defaults 脚本由 OpenWrt 用 `sh` 显式调用、不需要 +x，
+    # 所以这个缺陷在 CI 里完全不报错，只有真机才暴露。
+    find files/usr/bin files/etc/init.d files/etc/uci-defaults -type f \
+        -exec chmod 0755 {} \; 2>/dev/null
+    echo "  -> files overlay 已合并（脚本执行位已强制 0755）"
+    ls -l files/usr/bin/ | sed 's/^/     /'
 fi
 
 echo "[r1c] 设置默认主机名与 Site ID 占位（真实 Site ID 由 /etc/r1c/site.conf 提供）"

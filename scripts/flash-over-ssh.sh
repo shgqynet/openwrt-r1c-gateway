@@ -116,8 +116,11 @@ probe)
     r "cat /tmp/sysinfo/board_name 2>/dev/null; cat /tmp/sysinfo/model 2>/dev/null"
     echo
     echo "--- 运行模式：initramfs(RAM) 还是固化系统 ---"
-    r "grep -q 'root=/dev/ram\|initramfs' /proc/cmdline && echo 'RAM / initramfs（未固化，断电回到 breed）' || echo 'Flash / 固化系统'"
-    r "mount | grep -E ' / .*(tmpfs|ramfs|overlay)' | head -3"
+    # ⚠️ 不能用 /proc/cmdline 判断：initramfs 的 cmdline 里没有 "initramfs" 字样
+    # （实测为 console=ttyS0,115200 rootfstype=squashfs,jffs2），会误判成"固化系统"。
+    # 唯一可靠判据是 overlay 是否挂载：固化系统 / 是 overlay，initramfs 是 tmpfs。
+    r "mount | grep ' / '"
+    r "if mount | grep -q 'overlay'; then echo '判定: Flash / 固化系统（已写入 Flash）'; else echo '判定: RAM / initramfs（未固化，断电回到 breed）'; fi"
     echo
     echo "--- 分区表（关键：factory 必须 read-only）---"
     r "cat /proc/mtd"
@@ -126,8 +129,9 @@ probe)
     r "dmesg | grep -iE 'mtd.*partition|flash.*found' | tail -8"
     echo
     echo "--- MAC（factory 偏移 0x28，全 00/11:22:33 属异常）---"
+    # busybox hexdump 会忽略文件参数之后的 -s/-n（实测 dump 了整个分区），改用 dd 取偏移
     r "FW=\$(grep '\"factory\"' /proc/mtd | cut -d: -f1)
-[ -n \"\$FW\" ] && hexdump -C /dev/\$FW -s 0x28 -n 6 || echo '未找到 factory 分区'"
+[ -n \"\$FW\" ] && dd if=/dev/\$FW bs=1 skip=40 count=6 2>/dev/null | hexdump -C || echo '未找到 factory 分区'"
     r "ifconfig -a | grep -iE 'eth0|wlan|HWaddr' | head -6"
     echo
     echo "--- 自研工具是否都在（应为 4 个）---"
@@ -143,6 +147,9 @@ verify)
     echo
     echo "--- 1. 工具清单 ---"
     r "for t in r1c-apply r1c-status r1c-diagnose r1c-test-plc; do command -v \$t >/dev/null && echo \"OK   \$t\" || echo \"MISS \$t\"; done"
+    echo
+    echo "--- 1b. 执行位（缺 +x 会 Permission denied，而 CI 的存在性校验查不出）---"
+    r "for t in /usr/bin/r1c-apply /usr/bin/r1c-status /usr/bin/r1c-diagnose /usr/bin/r1c-test-plc /etc/init.d/r1c-gateway; do [ -x \$t ] && echo \"OK   -x \$t\" || echo \"FAIL 无执行位 \$t (\$(stat -c%a \$t 2>/dev/null))\"; done"
     echo
     echo "--- 2. 占位配置必须被拒绝（期望 exit 1）---"
     r "r1c-apply --check; echo \"exit=\$?\""
@@ -163,8 +170,8 @@ verify)
     echo "--- 7. USB ---"
     r "lsusb 2>/dev/null || echo '（未插设备或无 lsusb）'"
     echo
-    echo "--- 8. MAC 真实性 ---"
-    r "FW=\$(grep '\"factory\"' /proc/mtd | cut -d: -f1); [ -n \"\$FW\" ] && hexdump -C /dev/\$FW -s 0x28 -n 6"
+    echo "--- 8. MAC 真实性（factory+0x28，全 00/11:22:33 属异常）---"
+    r "FW=\$(grep '\"factory\"' /proc/mtd | cut -d: -f1); [ -n \"\$FW\" ] && dd if=/dev/\$FW bs=1 skip=40 count=6 2>/dev/null | hexdump -C"
     echo
     ok "验收采集完成 —— 逐项对照 docs/FIRST-BOOT.md 第 3 节判读"
     ;;
