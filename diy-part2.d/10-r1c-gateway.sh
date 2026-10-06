@@ -30,6 +30,24 @@ for pkg in r1c-gateway; do
     fi
 done
 
+echo "[r1c] 兜底注入 LuCI 简体中文语言包"
+# 2026-10-07 教训：configs/r1c-gateway.config 里写成
+#   CONFIG_PACKAGE_luci-i18n-base-zh-cn=y   # 140 KiB
+# 这类行尾注释会被 kconfig 静默忽略 —— 包"看起来选中了"，make 一路全绿，
+# 但 rootfs 里 0 个 *.zh-cn.lmo，直到 90 分钟后验收才炸。
+# 这里沿用 r1c-gateway 的模式再注入一次：删掉 not-set 行 + 追加干净的 =y 行。
+for pkg in \
+    luci-i18n-base-zh-cn \
+    luci-i18n-firewall-zh-cn \
+    luci-i18n-package-manager-zh-cn \
+    luci-i18n-mwan3-zh-cn
+do
+    sed -i "/^# CONFIG_PACKAGE_${pkg} is not set\$/d" .config
+    grep -q "^CONFIG_PACKAGE_${pkg}=y\$" .config || \
+        echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+    echo "  -> .config: CONFIG_PACKAGE_${pkg}=y"
+done
+
 echo "[r1c] 注入 files/ 到 rootfs overlay"
 if [ -d "$REPO_SRC/files" ]; then
     mkdir -p files

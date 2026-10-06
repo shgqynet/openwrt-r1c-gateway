@@ -137,6 +137,31 @@ jobs:
       run: |
         cd openwrt
         make defconfig
+        # ⚠️ 快速失败：defconfig 之后立刻确认中文包真的被选中。
+        # 第 9 次构建（37490730637）的教训：.config 里 `CONFIG_X=y   # 注释`
+        # 会被 kconfig 静默忽略，包"看着选中"实则是 n，编译一路全绿，
+        # 结果 90 分钟后 rootfs 里一个 lmo 都没有才暴露。这里提前到 1 分钟内拦下。
+        echo "--- defconfig 后 i18n 生效检查 ---"
+        I18N_MISS=0
+        for p in \
+          luci-i18n-base-zh-cn \
+          luci-i18n-firewall-zh-cn \
+          luci-i18n-package-manager-zh-cn \
+          luci-i18n-mwan3-zh-cn
+        do
+          if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
+            echo "  ✅ $p"
+          else
+            echo "  ❌ $p 未生效（.config 中相关行 $(grep -c "CONFIG_PACKAGE_${p}" .config) 条）"
+            I18N_MISS=$((I18N_MISS+1))
+          fi
+        done
+        echo "  --- .config 中所有 i18n / LUCI_LANG 行 ---"
+        grep -E "^CONFIG_PACKAGE_luci-i18n|^CONFIG_LUCI_LANG" .config | sed 's/^/    /'
+        if [ "$I18N_MISS" -ne 0 ]; then
+          echo "::error::defconfig 后有 $I18N_MISS 个中文包未生效，立即中止（不要等 90 分钟）"
+          exit 1
+        fi
         # defconfig 会覆盖版本号，必须在其后注入
         sed -i '/^CONFIG_VERSION_NUMBER=/d' .config
         echo "CONFIG_VERSION_NUMBER=\"${{ env.BUILD_VERSION }}\"" >> .config
