@@ -1,5 +1,8 @@
 # 首次装机与验证（breed 路线）
 
+> 📋 **要逐步照着做的作业手册，看 [FLASH-RUNBOOK.md](FLASH-RUNBOOK.md)。**
+> 本文讲设计原理与判读依据（为什么这么做），runbook 讲操作步骤（怎么做）。
+
 > 适用：已刷入 **breed**（`breed-mt7620-xiaomi-mini.bin`）并完成备份的 R1C。
 
 ## 谁来执行（已确认的分工）
