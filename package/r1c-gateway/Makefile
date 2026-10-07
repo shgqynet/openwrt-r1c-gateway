@@ -51,6 +51,18 @@ define Package/r1c-gateway/install
 	$(INSTALL_BIN) ./files/usr/bin/r1c-wg-watchdog $(1)/usr/bin/r1c-wg-watchdog
 	$(INSTALL_DIR) $(1)/etc/r1c
 	$(INSTALL_CONF) ./files/etc/r1c/site.conf $(1)/etc/r1c/site.conf
+	# sysupgrade 保留 /etc/r1c/ —— 没有这条，升级会把站点配置和 WG 私钥一起抹掉。
+	#
+	# ⚠️ 这个坑是 2026-10-07 准备刷机时实测发现的：/etc/sysupgrade.conf 里只有
+	#    /etc/config/ 等系统项，**不包含 /etc/r1c/**，而 WG 私钥存在
+	#    /etc/r1c/wg-private.key。升完级：LAN/无线配置因 /etc/config/ 保留而活着，
+	#    但 site.conf 没了 → PLC 网段、设备清单、端点全丢，表现是"刷完隧道还在、
+	#    PLC 不通"，极易误判成网络问题。
+	#    OpenWrt 的机制：保留项 = /etc/sysupgrade.conf + /lib/upgrade/keep.d/* 里的行。
+	#    放 keep.d 而不追加 sysupgrade.conf，是因为前者随包安装、不吃用户改动。
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/lib/upgrade/keep.d/r1c-gateway \
+		$(1)/lib/upgrade/keep.d/r1c-gateway
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/etc/uci-defaults/90-r1c-wireless-sta.sh \
 		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
