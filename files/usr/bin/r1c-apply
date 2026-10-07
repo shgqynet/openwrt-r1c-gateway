@@ -201,6 +201,14 @@ EOF
             8)  TUNNEL_NETS="$_o1.0.0.0/8" ;;
             16) TUNNEL_NETS="$_o1.$_o2.0.0/16" ;;
             24) TUNNEL_NETS="$_o1.$_o2.$_o3.0/24" ;;
+            32)
+                # /32 常见于 Hub 分发给客户端的单地址（如 10.0.0.9/32），无法反推网段。
+                # 绝不可退化成 0.0.0.0/0：那样 route_allowed_ips=1 会把默认路由指进隧道，
+                # WAN(手机热点) 随之不可达 → 端点不可达 → 隧道自身断流（自杀）。
+                echo "  ✗ VPN_ADDR=${VPN_ADDR} 是 /32，无法推导走隧道路由，必须显式设置 WG_PEER_ALLOWED_IPS" >&2
+                echo "    例如单个 Hub 网段：WG_PEER_ALLOWED_IPS=\"10.0.0.0/24\"" >&2
+                exit 1
+                ;;
             *)  TUNNEL_NETS="0.0.0.0/0" ;;
         esac
     fi
@@ -221,6 +229,20 @@ EOF
     # peer 段
     emit set network.wg_peer=wireguard_${VPN_IFACE}
     emit set network.wg_peer.public_key="${WG_PEER_PUBLIC_KEY}"
+    # 预共享密钥(PSK)：很多 Hub 端生成 client conf 时会附带 PresharedKey，
+    # 本端不带而 Hub 要求 PSK 时会握手失败（且日志里往往只表现为 handshake timeout）。
+    # 与私钥同样处理 —— 只从文件读，不写进 site.conf（该文件会进公开仓库）。
+    if [ -n "${WG_PRESHARED_KEY_FILE:-}" ]; then
+        if [ -f "${WG_PRESHARED_KEY_FILE}" ]; then
+            if [ "$MODE" = "dryrun" ]; then
+                echo "  uci set network.wg_peer.preshared_key=<读取自 ${WG_PRESHARED_KEY_FILE}>"
+            else
+                emit set network.wg_peer.preshared_key="$(cat "${WG_PRESHARED_KEY_FILE}")"
+            fi
+        else
+            warn "跳过 PSK（文件不存在）: ${WG_PRESHARED_KEY_FILE}"
+        fi
+    fi
     emit set network.wg_peer.allowed_ips="${TUNNEL_NETS}"
     emit set network.wg_peer.route_allowed_ips='1'
     emit set network.wg_peer.persistent_keepalive="${WG_KEEPALIVE:-25}"

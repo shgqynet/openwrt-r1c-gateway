@@ -19,7 +19,18 @@ case "${PLC_ROLE:-gateway}" in
     *)    echo "PLC Gateway    ${PLC_GATEWAY:-UNSET}" ;;
 esac
 _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
-[ -n "${_lan_ip:-}" ] && echo "LAN (applied)  ${_lan_ip}  <- 实际生效，应与上面一致"
+if [ -n "${_lan_ip:-}" ]; then
+    # 期望值随角色而变；未 apply 时两者不一致，文案要说清这是"待生效"而非"配置错误"
+    case "${PLC_ROLE:-gateway}" in
+        host) _expect="${PLC_LOCAL_IP:-}" ;;
+        *)    _expect="${PLC_GATEWAY:-}" ;;
+    esac
+    if [ "$_lan_ip" = "$_expect" ]; then
+        echo "LAN (applied)  ${_lan_ip}  <- 已生效"
+    else
+        echo "LAN (applied)  ${_lan_ip}  <- 与 site.conf 不一致(应为 ${_expect})，需执行 r1c-apply"
+    fi
+fi
 
 echo "VPN Mode       ${VPN_MODE:-UNSET}  (${VPN_ADDR:-UNSET})"
 echo "Uptime         $(uptime | sed 's/^.*up //; s/,.*//')"
@@ -45,12 +56,45 @@ fi
 [ -n "$vpn_ip" ] && echo "VPN            ONLINE (${vpn_ip})" || echo "VPN            OFFLINE"
 
 # --- PLC ---
-if [ -n "${PLC_GATEWAY:-}" ]; then
-    if ping -c1 -W2 "$PLC_GATEWAY" >/dev/null 2>&1; then
-        echo "PLC Network    ONLINE (gw ${PLC_GATEWAY} reachable)"
+# ⚠️ 早期实现一律 ping $PLC_GATEWAY，这在 host 模式下是错的：
+#    host 模式 R1C 只占 PLC_LOCAL_IP，PLC_GATEWAY 是出厂占位值（192.168.10.1），
+#    既不属于本机也未必存在，判出来的 ONLINE/OFFLINE 毫无意义且严重误导现场运维。
+# 正确判据按优先级：
+#   1) PLC_DEVICES 清单里有设备 → 逐个 ICMP 探活，任一通即 ONLINE（反映真实链路）
+#   2) gateway 模式没清单     → 本机就是网关，检查同网段是否学到邻居即可
+#   3) host 模式没清单        → 明确显示"未配置设备清单"，而不是猜一个地址去 ping
+_start=$(cut -d% -f1 < /proc/uptime 2>/dev/null)
+# 清洗：去掉空行与注释行。site.conf 的出厂值是 PLC_DEVICES="\n"，
+# 直接 [ -n "$PLC_DEVICES" ] 会因含换行而判定为非空，导致把空清单当成有效清单。
+PLC_LIST=$(printf '%s\n' "${PLC_DEVICES:-}" | grep -v '^[[:space:]]*$' | grep -v '^#')
+_plc_target=""
+_probe_result=""
+if [ -n "$PLC_LIST" ]; then
+    while IFS='|' read -r _n _ip _t _d; do
+        case "${_n:-}" in ''|\#*) continue ;; esac
+        [ -n "${_ip:-}" ] || continue
+        _plc_target="$_ip"
+        if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
+            break
+        fi
+    done <<EOF
+${PLC_LIST}
+EOF
+    if [ -n "$_plc_target" ] && ping -c1 -W2 "$_plc_target" >/dev/null 2>&1; then
+        echo "PLC Network    ONLINE (device ${_plc_target} reachable)"
     else
-        echo "PLC Network    OFFLINE (gw ${PLC_GATEWAY} unreachable)"
+        echo "PLC Network    OFFLINE (device ${_plc_target:-<清单无有效IP>} unreachable)"
     fi
+elif [ "${PLC_ROLE:-}" = "gateway" ]; then
+    # 本机即网关：看同网段有没有学到邻居（有则网段里确实挂着设备）
+    _nbrs=$(ip neigh show 2>/dev/null | grep -cE "REACHABLE|STALE|DELAY")
+    if [ "${_nbrs:-0}" -gt 0 ]; then
+        echo "PLC Network    ONLINE (${_nbrs} neighbor(s) on LAN)"
+    else
+        echo "PLC Network    OFFLINE (no neighbor learned)"
+    fi
+else
+    echo "PLC Network    UNKNOWN (未配置 PLC_DEVICES 清单，无法判定)"
 fi
 
 echo
