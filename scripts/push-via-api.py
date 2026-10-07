@@ -48,8 +48,21 @@ def main():
 
     tree_entries = []
     for path in changed:
-        # 用 git blob 内容，确保与仓库对象一致（含 LF 规范化后的形态）
-        blob = git("rev-parse", f"{head_ref}:{path}").decode().strip()
+        # ⚠️ 两个必须处理的情形（2026-10-07 推送删除文件的提交时踩到）：
+        #   1. 文件在 head 上不存在 = 删除 → 必须给 sha:null，否则 GitHub 保留旧文件
+        #   2. mode 必须从 ls-tree 取，不能一律 100644 ——
+        #      www/cgi-bin/r1c 是 CGI，丢了 100755 就没有执行位
+        info = subprocess.run(["git", "-C", REPO_DIR, "ls-tree", head_ref, "--", path],
+                              capture_output=True)
+        entry = (info.stdout.decode().strip() or "")
+        if not entry:
+            tree_entries.append({"path": path, "mode": "100644", "type": "blob",
+                                 "sha": None})
+            print(f"  delete {path}")
+            continue
+
+        mode = entry.split()[0]
+        blob = entry.split()[2]
         content = git("cat-file", "blob", blob)
         b64 = base64.b64encode(content).decode()
         payload = json.dumps({"content": b64, "encoding": "base64"})
@@ -60,9 +73,9 @@ def main():
             print(f"!! blob 创建失败 {path}: {exc.stderr}")
             raise
         blob_sha = json.loads(out)["sha"]
-        tree_entries.append({"path": path, "mode": "100644", "type": "blob",
+        tree_entries.append({"path": path, "mode": mode, "type": "blob",
                              "sha": blob_sha})
-        print(f"  blob {path} -> {blob_sha[:8]}")
+        print(f"  blob {path} ({mode}) -> {blob_sha[:8]}")
 
     tree_payload = json.dumps({"base_tree": base_tree, "tree": tree_entries})
     tree_sha = json.loads(
