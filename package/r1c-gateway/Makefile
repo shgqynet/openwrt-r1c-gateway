@@ -56,19 +56,15 @@ define Package/r1c-gateway/install
 		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
 	$(INSTALL_BIN) ./files/etc/uci-defaults/91-r1c-luci-lang.sh \
 		$(1)/etc/uci-defaults/91-r1c-luci-lang.sh
-	# LuCI 页面：站点配置 / 应用与校验 / 运行状态。
-	# 用 INSTALL_DATA(0644) 而非 INSTALL_BIN —— lua/htm 不需要执行位，
-	# 给 +x 反而会误导后面看权限的人。
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
-	$(INSTALL_DATA) ./files/usr/lib/lua/luci/controller/r1c-gateway.lua \
-		$(1)/usr/lib/lua/luci/controller/r1c-gateway.lua
-	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/r1c-gateway
-	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/config.htm \
-		$(1)/usr/lib/lua/luci/view/r1c-gateway/config.htm
-	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/apply.htm \
-		$(1)/usr/lib/lua/luci/view/r1c-gateway/apply.htm
-	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/status.htm \
-		$(1)/usr/lib/lua/luci/view/r1c-gateway/status.htm
+	# 本地应急管理页（http://<lan-ip>/cgi-bin/r1c）
+	#
+	# ⚠️ 不要改成 /usr/lib/lua/luci/ 下的 LuCI 页面：
+	#    24.10 的 luci-base 是 26.x 纯 JS 架构，菜单由 /usr/share/luci/menu.d/*.json
+	#    定义，不再扫描 Lua controller；而且本固件**没有 lua 解释器**，
+	#    menu.json 的 template action 渲染时直接报 "No Lua runtime installed"。
+	#    本页是纯 busybox ash 的 CGI，零新增依赖。
+	$(INSTALL_DIR) $(1)/www/cgi-bin
+	$(INSTALL_BIN) ./files/www/cgi-bin/r1c $(1)/www/cgi-bin/r1c
 endef
 
 define Package/r1c-gateway/postinst

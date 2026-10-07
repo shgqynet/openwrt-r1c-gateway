@@ -59,7 +59,9 @@ if [ -d "$REPO_SRC/files" ]; then
     #   ash: r1c-apply: Permission denied (exit 126)
     # 而 uci-defaults 脚本由 OpenWrt 用 `sh` 显式调用、不需要 +x，
     # 所以这个缺陷在 CI 里完全不报错，只有真机才暴露。
-    find files/usr/bin files/etc/init.d files/etc/uci-defaults -type f \
+    # www/cgi-bin/r1c 也必须在这里补 +x：uhttpd 只执行带执行位的 CGI，
+    # 否则浏览器打开 /cgi-bin/r1c 会直接下载源码而不是执行它。
+    find files/usr/bin files/etc/init.d files/etc/uci-defaults files/www/cgi-bin -type f \
         -exec chmod 0755 {} \; 2>/dev/null
     echo "  -> files overlay 已合并（脚本执行位已强制 0755）"
     ls -l files/usr/bin/ | sed 's/^/     /'

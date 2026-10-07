@@ -1,0 +1,623 @@
+#!/bin/sh
+# R1C 工业远程网关 —— 本地应急管理页
+#
+# ⚠️ 为什么是这个形态（别改成 LuCI 页面，除非固件里加了 lua）：
+#   * 24.10 的 luci-base 是 26.x 纯 JS 架构，菜单改由 /usr/share/luci/menu.d/*.json
+#     定义，**不再扫描 /usr/lib/lua/luci/controller/*.lua**，Lua 控制器写了也不会生效
+#   * 固件里**没有 lua 解释器**，menu.json 的 template action 渲染时直接报
+#     "No Lua runtime installed" → 500
+#   * 本页只用 busybox ash + uhttpd 的 cgi_prefix，零新增依赖，580MHz 上秒开
+#
+# 定位：**隧道断了也能用**。
+#   服务器页（Ubuntu）依赖隧道 → 隧道依赖 WAN → 现场一换热点隧道就断
+#   → 服务器页连不上网关 → 改不了 WiFi → 死锁。
+#   破这个死锁的唯一途径就是本地页，所以 **WiFi 上行必须在本地改**。
+#
+# 与服务器页的分工：服务器页 = 远程集中管理；本页 = 现场应急 + 离线排障。
+
+CONF=/etc/r1c/site.conf
+APPLY_LOG=/tmp/r1c-apply.log
+WIFI_LOG=/tmp/r1c-wifi.log
+TMPD=/tmp/r1c-web
+BACKUP_KEEP=5
+
+mkdir -p "$TMPD"
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+# HTML 转义（所有回显到页面的值都必须过一遍，否则配置里的字符会破坏页面结构）
+h() {
+    printf '%s' "${1:-}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# URL 解码：依赖 busybox printf 的 %b 支持 \xHH（实测可用）
+urldecode() {
+    printf '%b' "$(printf '%s' "${1:-}" | sed -e 's/+/ /g' -e 's/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"
+}
+
+# 从 site.conf 读某个键的值（支持 PLC_DEVICES 这种跨行引号值）
+conf_get() {
+    [ -f "$CONF" ] || return 0
+    awk -v K="$1" '
+    {
+        if (m) { if ($0 ~ /^[[:space:]]*"/) exit; print; next }
+    }
+    /^[A-Za-z_][A-Za-z0-9_]*=/ {
+        k = $0; sub(/=.*$/, "", k)
+        if (k == K) {
+            v = $0; sub(/^[^=]*=/, "", v)
+            sub(/^[[:space:]]*"/, "", v)
+            if (v ~ /"/) { sub(/"[[:space:]]*(#.*)?$/, "", v); print v; exit }
+            print v; m = 1
+        }
+    }' "$CONF"
+}
+
+# 把 KEY 的值整体替换掉。
+# 值从文件读（而不是 -v 传参）：避免值里出现换行/引号时把 awk 参数搞坏，
+# 也顺带避开了 sed 替换时对 & / \ 的转义地狱。
+conf_set() {
+    _k="$1"; _vf="$2"
+    [ -f "$CONF" ] || : > "$CONF"
+    awk -v K="$_k" -v VF="$_vf" '
+    # ⚠️ 单行键必须写成 KEY="value"。
+    #    第一版统一写成跨行引号（KEY="\nvalue\n"），结果值里混进了换行符 ——
+    #    shell 把它 source 进来后 WG_ENDPOINT / VPN_ADDR 全都带 \n，r1c-apply 直接配错。
+    #    只有 PLC_DEVICES（或值本身多于一行）才用跨行格式。
+    function loadval() {
+        nv = 0
+        close(VF)
+        while ((getline t < VF) > 0) val[++nv] = t
+    }
+    function emit(tail) {
+        if (nv <= 1 && K != "PLC_DEVICES") {
+            printf "%s=\"%s\"%s\n", K, (nv ? val[1] : ""), tail
+        } else {
+            printf "%s=\"\n", K
+            for (i = 1; i <= nv; i++) print val[i]
+            print "\"" tail
+        }
+    }
+    BEGIN { found = 0; inm = 0 }
+    {
+        if (inm) {                       # 原多行值的内部，原样丢弃
+            if ($0 ~ /^[[:space:]]*"/) inm = 0
+            next
+        }
+        if ($0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+            k = $0; sub(/=.*$/, "", k)
+            if (k == K) {
+                found = 1
+                tail = ""
+                if ($0 ~ /"[[:space:]]*#/) tail = " " substr($0, index($0, "#"))
+                loadval(); emit(tail)
+                rest = $0; sub(/^[^=]*=/, "", rest)
+                if (rest ~ /^[[:space:]]*"[^"]*$/) inm = 1   # 值没闭合 → 多行
+                next
+            }
+        }
+        print
+    }
+    END { if (!found) { loadval(); emit("") } }' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF"
+}
+
+# 把多行文本写成"值文件"（去掉空行；全空时保留一个空行，与原文件风格一致）
+mkval() {
+    printf '%s\n' "${1:-}" | grep -v '^[[:space:]]*$' > "$2"
+    [ -s "$2" ] || printf '\n' > "$2"
+}
+
+# TCP 端口探测。busybox nc 没有 -w/-z，系统里也没有 timeout，
+# 不自建超时的话，对 filtered 端口会永久阻塞整个页面。
+probe_tcp() {
+    ( nc "$1" "$2" </dev/null >/dev/null 2>&1 ) &
+    _p=$!
+    ( sleep 2; kill -9 "$_p" 2>/dev/null ) &
+    _k=$!
+    wait "$_p" 2>/dev/null
+    _rc=$?
+    kill -9 "$_k" 2>/dev/null
+    return $_rc
+}
+
+backup_conf() {
+    cp "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null
+    # 只留最近几份，别把 flash 撑爆
+    ls -1t "$CONF".bak.* 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | while read -r f; do rm -f "$f"; done
+}
+
+# ---------------------------------------------------------------------------
+# 访问控制：只允许从 LAN 侧 / VPN 侧打开，拒绝从 WAN 进来
+# 判定方法：看通往来源地址的路由从哪个接口出去 —— 默认路由的出口就是 WAN。
+# ---------------------------------------------------------------------------
+guard() {
+    _wan=$(ip route 2>/dev/null | awk '/^default /{print $5; exit}')
+    _dev=""
+    [ -n "${REMOTE_ADDR:-}" ] && _dev=$(ip route get "$REMOTE_ADDR" 2>/dev/null | head -1 \
+        | sed -n 's/.*dev \([A-Za-z0-9_.:@-]*\).*/\1/p')
+    case "$_dev" in
+        ""|lo) ;;                       # 本机/无法判定（本地执行）时放行
+        "$_wan") deny "不允许从 WAN 侧访问本页（来源 $_dev）" ;;
+        *) ;;                           # br-lan、wg0 等内网接口
+    esac
+}
+
+deny() {
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    printf '403 Forbidden: %s\n' "$1"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# 页面框架
+# ---------------------------------------------------------------------------
+html_head() {
+    _title="$1"; _refresh="$2"
+    printf 'Content-Type: text/html; charset=utf-8\r\n'
+    printf 'Cache-Control: no-store\r\n'
+    printf '\r\n'
+    cat <<EOF
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+EOF
+    [ -n "$_refresh" ] && printf '<meta http-equiv="refresh" content="%s">\n' "$_refresh"
+    printf '<title>%s — R1C 网关</title>\n' "$(h "$_title")"
+    cat <<'EOF'
+<style>
+body{margin:0;background:#f5f6f8;color:#222;font:14px/1.6 -apple-system,"Microsoft YaHei",sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:#888;font-size:12px;margin-bottom:14px}
+nav{background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:8px 10px;margin-bottom:14px}
+nav a{display:inline-block;margin-right:14px;color:#1a73c7;text-decoration:none;font-size:13px}
+nav a.cur{font-weight:bold;color:#111}
+.card{background:#fff;border:1px solid #e3e6ea;border-radius:6px;padding:12px 14px;margin-bottom:12px}
+.card h2{margin:0 0 10px;font-size:14px;color:#333}
+.grid{display:flex;flex-wrap:wrap;gap:8px 26px}
+.it{min-width:200px}
+.k{color:#888;font-size:12px}
+.v{font-family:monospace;font-size:13px;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border-bottom:1px solid #eee;padding:6px 8px;text-align:left}
+th{color:#777;font-weight:normal}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.up{background:#43a047}.down{background:#e53935}.unk{background:#9e9e9e}
+label{display:block;margin:10px 0 3px;font-size:13px;color:#444}
+input[type=text],input[type=password],select,textarea{width:100%;max-width:460px;padding:6px 8px;border:1px solid #ccd2d8;border-radius:4px;font-size:13px;box-sizing:border-box}
+textarea{font-family:monospace;min-height:80px}
+button{margin-top:14px;padding:8px 18px;background:#1a73c7;color:#fff;border:0;border-radius:4px;font-size:14px;cursor:pointer}
+button.warn{background:#c62828}
+.hint{color:#888;font-size:12px;margin-top:3px}
+.warnbox{background:#fff8e1;border:1px solid #ffe0b2;border-radius:4px;padding:8px 12px;margin-bottom:12px;font-size:13px}
+pre{background:#fafafa;border:1px solid #eee;border-radius:4px;padding:10px;overflow:auto;font-size:12px;max-height:420px}
+</style>
+</head>
+<body>
+<div class="wrap">
+EOF
+    printf '<h1>R1C 网关 — %s</h1>\n' "$(h "$_title")"
+    printf '<div class="sub">本地应急管理页 · 仅可从内网访问 · %s</div>\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    _p="${PAGE:-status}"
+    cat <<EOF
+<nav>
+<a href="?p=status" class="$([ "$_p" = status ] && echo cur)">运行状态</a>
+<a href="?p=wifi" class="$([ "$_p" = wifi ] && echo cur)">WiFi 上行</a>
+<a href="?p=site" class="$([ "$_p" = site ] && echo cur)">站点与 PLC</a>
+<a href="?p=diag">诊断报告</a>
+<a href="?p=log" class="$([ "$_p" = log ] && echo cur)">应用日志</a>
+</nav>
+EOF
+}
+
+html_foot() {
+    cat <<'EOF'
+<div class="hint" style="margin-top:16px">
+本页只监听内网，不会从 WAN 侧开放。改动会写入 /etc/r1c/site.conf 或无线配置，
+应用时网络会中断数秒；若改了 LAN 网段，请用新地址重新打开。
+</div>
+</div></body></html>
+EOF
+    exit 0
+}
+
+row() {
+    printf '<div class="it"><div class="k">%s</div><div class="v">%s</div></div>\n' "$(h "$1")" "$2"
+}
+
+# ---------------------------------------------------------------------------
+# 运行状态
+# ---------------------------------------------------------------------------
+page_status() {
+    html_head "运行状态" 10
+    cat <<'EOF'
+<div class="warnbox">
+本页每 10 秒自动刷新。这里看的是<b>网关自己</b>的视角 —— 从家里服务器看不到的
+（比如隧道为什么断了、热点有没有连上），到这一页来看。
+</div>
+EOF
+
+    _dev_wan=$(ip route 2>/dev/null | awk '/^default /{print $5; exit}')
+    _ip_wan=$(ip -4 addr show dev "$_dev_wan" 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')
+    _gw=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
+    _lan=$(uci -q get network.lan.ipaddr)
+    _ssid=$(uci -q get wireless.r1c_wwan.ssid)
+    _radio=$(uci -q get wireless.r1c_wwan.device)
+
+    printf '<div class="card"><h2>上行（WAN）</h2><div class="grid">\n'
+    row "接口" "$(h "${_dev_wan:-未获取}")"
+    row "IP" "$(h "${_ip_wan:-—}")"
+    row "网关" "$(h "${_gw:-—}")"
+    if [ -n "$_ssid" ]; then
+        row "热点 SSID" "$(h "$_ssid")（$(h "$_radio")）"
+    fi
+    if ping -c1 -W2 223.5.5.5 >/dev/null 2>&1; then
+        row "外网连通" '<span class="dot up"></span>通'
+    else
+        row "外网连通" '<span class="dot down"></span>不通（隧道必然建不起来）'
+    fi
+    printf '</div></div>\n'
+
+    # --- WireGuard ---
+    if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+        _wg=$(wg show wg0 2>/dev/null)
+        _ep=$(printf '%s\n' "$_wg" | awk '/endpoint:/{print $2; exit}')
+        _hs=$(printf '%s\n' "$_wg" | sed -n 's/.*latest handshake: \(.*\)/\1/p')
+        _tx=$(printf '%s\n' "$_wg" | sed -n 's/.*transfer: \(.*\)/\1/p')
+        _port=$(printf '%s\n' "$_wg" | awk '/listening port:/{print $3; exit}')
+        _ka=$(printf '%s\n' "$_wg" | sed -n 's/.*persistent keepalive: \(.*\)/\1/p')
+        printf '<div class="card"><h2>WireGuard 隧道</h2><div class="grid">\n'
+        row "配置的端点" "$(h "$(conf_get WG_ENDPOINT)")"
+        row "实际连接" "$(h "${_ep:-—}")"
+        if printf '%s' "$_hs" | grep -q 'ago'; then
+            row "最近握手" "<span class=\"dot up\"></span>$(h "$_hs")"
+        else
+            row "最近握手" '<span class="dot down"></span>从未握手 / 已断开'
+        fi
+        row "流量" "$(h "${_tx:-—}")"
+        row "监听端口" "$(h "${_port:-—}")"
+        row "保活" "$(h "${_ka:-—}")"
+        printf '</div></div>\n'
+    else
+        printf '<div class="card"><h2>WireGuard 隧道</h2><div class="v">wg0 接口不存在或未配置</div></div>\n'
+    fi
+
+    # --- 站点与 PLC ---
+    printf '<div class="card"><h2>站点 / PLC</h2><div class="grid">\n'
+    row "站点 ID" "$(h "$(conf_get SITE_ID)")"
+    row "角色" "$(h "$(conf_get PLC_ROLE)")"
+    row "PLC 网段" "$(h "$(conf_get PLC_NETWORK)")"
+    row "本机 LAN" "$(h "${_lan:-—}")"
+    printf '</div>\n'
+
+    _list=$(conf_get PLC_DEVICES | grep -v '^[[:space:]]*$')
+    if [ -n "$_list" ]; then
+        printf '<table><tr><th>设备</th><th>IP</th><th>类型</th><th>ICMP</th><th>TCP/102</th><th>说明</th></tr>\n'
+        printf '%s\n' "$_list" | while IFS='|' read -r _n _ip _t _d; do
+            [ -n "$_ip" ] || continue
+            if ping -c1 -W1 "$_ip" >/dev/null 2>&1; then
+                _ic='<span class="dot up"></span>通'
+            else
+                _ic='<span class="dot down"></span>不通'
+            fi
+            if probe_tcp "$_ip" 102; then
+                _tc='<span class="dot up"></span>open'
+            else
+                _tc='<span class="dot down"></span>closed'
+            fi
+            printf '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n' \
+                "$(h "$_n")" "$(h "$_ip")" "$(h "$_t")" "$_ic" "$_tc" "$(h "$_d")"
+        done
+        printf '</table>\n'
+    else
+        printf '<div class="hint">未登记 PLC 设备清单（site.conf 的 PLC_DEVICES 为空）</div>\n'
+    fi
+    printf '</div>\n'
+
+    printf '<div class="card"><h2>系统</h2><div class="grid">\n'
+    # ⚠️ busybox 的 uptime 输出没有 "user" 字样，free 也可能不可用 —— 别照抄 desktop 写法
+    row "运行时间" "$(h "$(uptime 2>/dev/null | sed -n 's/.*up[[:space:]]*\([^,]*\),.*/\1/p')")"
+    row "负载" "$(h "$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)")"
+    row "内存" "$(h "$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2}
+        END{if(t) printf "已用 %.0f / 共 %.0f MB", (t-a)/1024, t/1024}' /proc/meminfo 2>/dev/null)")"
+    printf '</div></div>\n'
+    html_foot
+}
+
+# ---------------------------------------------------------------------------
+# WiFi 上行（本地页的核心：隧道断了以后唯一能改回热点的地方）
+# ---------------------------------------------------------------------------
+page_wifi() {
+    _ssid=$(uci -q get wireless.r1c_wwan.ssid)
+    _enc=$(uci -q get wireless.r1c_wwan.encryption)
+    _dev=$(uci -q get wireless.r1c_wwan.device)
+    _dis=$(uci -q get wireless.r1c_wwan.disabled)
+    _auto=$(uci -q get network.wwan.auto)
+    html_head "WiFi 上行"
+    cat <<'EOF'
+<div class="warnbox">
+<b>现场换热点时在这里改。</b>服务器页改不了 —— 它的管理通道就架在这条 WiFi 上，
+热点一变隧道就断，远程就再也连不进来。改完点下方按钮，设备会重连 WiFi（约 10~30 秒），
+隧道随后自动恢复。密码不会回显（显示"已配置"），留空表示不修改。
+</div>
+EOF
+    printf '<div class="card"><h2>当前状态</h2><div class="grid">\n'
+    row "SSID" "$(h "${_ssid:-—}")"
+    row "频段" "$(h "$_dev")$([ "$_dev" = radio0 ] && echo '（5G）' || echo '（2.4G）')"
+    row "加密" "$(h "${_enc:-none}")"
+    row "密码" "$( [ -n "$(uci -q get wireless.r1c_wwan.key)" ] && echo '已配置' || echo '未配置' )"
+    row "已启用" "$( [ "$_dis" = 1 ] && echo '<span class="dot down"></span>已禁用' || echo '<span class="dot up"></span>启用' )"
+    row "自动拨号" "$( [ "$_auto" = 1 ] && echo '<span class="dot up"></span>是' || echo '<span class="dot down"></span>否（netifd 不会给它建无线接口！）' )"
+    printf '</div></div>\n'
+
+    cat <<EOF
+<div class="card">
+<h2>修改上行热点</h2>
+<form method="post" action="?p=wifi">
+<label>热点名称 SSID</label>
+<input type="text" name="ssid" value="$(h "$_ssid")">
+<label>密码（留空 = 保持原密码不变）</label>
+<input type="password" name="key" placeholder="不修改请留空">
+<label>加密方式</label>
+<select name="enc">
+<option value="psk2" $([ "$_enc" = psk2 ] && echo selected)>WPA2-PSK（最常用）</option>
+<option value="psk-mixed" $([ "$_enc" = psk-mixed ] && echo selected)>WPA/WPA2 混合（老热点）</option>
+<option value="none" $([ "$_enc" = none ] && echo selected)>无密码（开放网络）</option>
+</select>
+<label>频段</label>
+<select name="radio">
+<option value="radio1" $([ "$_dev" = radio1 ] && echo selected)>2.4G（手机热点几乎都是这个）</option>
+<option value="radio0" $([ "$_dev" = radio0 ] && echo selected)>5G</option>
+</select>
+<label>启用</label>
+<select name="enabled">
+<option value="0" $([ "$_dis" != 1 ] && echo selected)>启用</option>
+<option value="1" $([ "$_dis" = 1 ] && echo selected)>禁用</option>
+</select>
+<div class="hint">选错频段是最常见的连不上原因：手机热点默认 2.4G，选 5G 会怎么都扫不到。</div>
+<button type="submit">保存并重连 WiFi</button>
+</form>
+</div>
+EOF
+    html_foot
+}
+
+wifi_save() {
+    _ssid=$(urldecode "${F_ssid:-}")
+    _key=$(urldecode "${F_key:-}")
+    _enc=$(urldecode "${F_enc:-psk2}")
+    _radio=$(urldecode "${F_radio:-radio1}")
+    _en=$(urldecode "${F_enabled:-0}")
+
+    [ -n "$_ssid" ] || { fail "SSID 不能为空"; return; }
+
+    cp /etc/config/wireless "/etc/config/wireless.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null
+    uci set wireless.r1c_wwan.ssid="$_ssid"
+    uci set wireless.r1c_wwan.encryption="$_enc"
+    uci set wireless.r1c_wwan.device="$_radio"
+    uci set wireless.r1c_wwan.disabled="$_en"
+    [ -n "$_key" ] && uci set wireless.r1c_wwan.key="$_key"
+    if [ "$_enc" = none ]; then
+        uci -q delete wireless.r1c_wwan.key
+    fi
+    # ⚠️ netifd 只在 auto=1 时才给 wwan 建无线接口；auto=0 时 iw dev 里一个 vif 都没有，
+    #    表现为"怎么都连不上"，极难查。这里强制置 1。
+    uci set network.wwan.auto=1
+    uci commit wireless
+    uci commit network
+
+    : > "$WIFI_LOG"
+    setsid sh -c "(
+        echo '--- 修改：SSID=$_ssid 频段=$_radio 加密=$_enc ---'
+        wifi reload 2>&1
+        sleep 12
+        echo '--- 结果 ---'
+        iwinfo \$(uci -q get wireless.r1c_wwan.device) assoclist 2>/dev/null | head -3
+        ip -4 addr show dev \$(ip route | awk '/^default /{print \$5; exit}') 2>/dev/null | awk '/inet /{print \"WAN IP:\", \$2}'
+        echo 'EXIT=0'
+    ) >> $WIFI_LOG 2>&1" </dev/null >/dev/null 2>&1 &
+    redirect "?p=log&t=wifi"
+}
+
+# ---------------------------------------------------------------------------
+# 站点与 PLC 配置
+# ---------------------------------------------------------------------------
+page_site() {
+    html_head "站点与 PLC 配置"
+    cat <<'EOF'
+<div class="warnbox">
+正常情况下这些在<b>服务器页</b>远程改就行。这里是隧道断了、或者你人就在现场时的入口。
+保存后会自动执行 <code>r1c-apply</code>（网络会中断几秒）；若改了 PLC 网段或本机 IP，
+请用新地址重新打开本页。私钥 / PSK 不在网页上处理（不回显、不修改）。
+</div>
+EOF
+    cat <<EOF
+<div class="card">
+<form method="post" action="?p=site">
+<h2>站点</h2>
+<label>站点 ID</label>
+<input type="text" name="SITE_ID" value="$(h "$(conf_get SITE_ID)")">
+
+<h2>PLC</h2>
+<label>角色</label>
+<select name="PLC_ROLE">
+<option value="host" $([ "$(conf_get PLC_ROLE)" = host ] && echo selected)>host（旁挂：本机占一个 PLC 网段 IP，自动做 SNAT）</option>
+<option value="gateway" $([ "$(conf_get PLC_ROLE)" = gateway ] && echo selected)>gateway（网关：本机做 PLC 网段的出口网关）</option>
+</select>
+<label>PLC 网段</label>
+<input type="text" name="PLC_NETWORK" value="$(h "$(conf_get PLC_NETWORK)")" placeholder="192.168.10.0/24">
+<label>本机在 PLC 网段的 IP（host 角色必填）</label>
+<input type="text" name="PLC_LOCAL_IP" value="$(h "$(conf_get PLC_LOCAL_IP)")" placeholder="192.168.10.254">
+<label>PLC 设备清单（每行一条：名称|IP|类型|说明）</label>
+<textarea name="PLC_DEVICES">$(h "$(conf_get PLC_DEVICES | grep -v '^[[:space:]]*$')")</textarea>
+<div class="hint">登记后，运行状态页会逐台做 ICMP + TCP/102 探活；不登记则只显示 UNKNOWN。</div>
+<label>SNAT</label>
+<select name="PLC_SNAT">
+<option value="auto" $([ "$(conf_get PLC_SNAT)" = auto ] && echo selected)>auto（host 角色自动做 MASQUERADE）</option>
+<option value="1" $([ "$(conf_get PLC_SNAT)" = 1 ] && echo selected)>强制开启</option>
+<option value="0" $([ "$(conf_get PLC_SNAT)" = 0 ] && echo selected)>关闭</option>
+</select>
+
+<h2>WireGuard</h2>
+<label>对端端点（域名:端口）</label>
+<input type="text" name="WG_ENDPOINT" value="$(h "$(conf_get WG_ENDPOINT)")" placeholder="www.example.com:51821">
+<label>对端公钥</label>
+<input type="text" name="WG_PEER_PUBLIC_KEY" value="$(h "$(conf_get WG_PEER_PUBLIC_KEY)")">
+<label>本端隧道地址（必须是 /32）</label>
+<input type="text" name="VPN_ADDR" value="$(h "$(conf_get VPN_ADDR)")" placeholder="10.66.0.9/32">
+<label>AllowedIPs（对端网段，用于生成路由与 SNAT 源）</label>
+<input type="text" name="WG_PEER_ALLOWED_IPS" value="$(h "$(conf_get WG_PEER_ALLOWED_IPS)")" placeholder="10.66.0.0/24">
+<div class="hint">绝不要填 0.0.0.0/0 —— 默认路由一进隧道，WAN 就不可达，隧道会自杀。</div>
+<label>保活间隔（秒）</label>
+<input type="text" name="WG_KEEPALIVE" value="$(h "$(conf_get WG_KEEPALIVE)")" placeholder="25">
+<button type="submit">保存并应用</button>
+</form>
+</div>
+EOF
+    html_foot
+}
+
+site_save() {
+    backup_conf
+    for k in SITE_ID PLC_ROLE PLC_NETWORK PLC_LOCAL_IP PLC_SNAT \
+             WG_ENDPOINT WG_PEER_PUBLIC_KEY VPN_ADDR WG_PEER_ALLOWED_IPS WG_KEEPALIVE; do
+        eval "_v=\${F_${k}:-}"
+        [ -n "$_v" ] || continue
+        mkval "$(urldecode "$_v")" "$TMPD/v.$k"
+        conf_set "$k" "$TMPD/v.$k"
+    done
+    mkval "$(urldecode "${F_PLC_DEVICES:-}")" "$TMPD/v.PLC_DEVICES"
+    conf_set PLC_DEVICES "$TMPD/v.PLC_DEVICES"
+
+    # 写坏了就别往下走：空配置一旦被 apply，设备会变成"配置全丢"的半死状态
+    _sz=$(wc -c < "$CONF" 2>/dev/null)
+    if [ "${_sz:-0}" -lt 200 ]; then
+        _last=$(ls -1t "$CONF".bak.* 2>/dev/null | head -1)
+        [ -n "$_last" ] && cp "$_last" "$CONF"
+        fail "写入后配置文件异常（${_sz} 字节），已回滚，未执行应用"
+        return
+    fi
+
+    : > "$APPLY_LOG"
+    setsid sh -c "r1c-apply >> $APPLY_LOG 2>&1; echo \"EXIT=\$?\" >> $APPLY_LOG" \
+        </dev/null >/dev/null 2>&1 &
+    redirect "?p=log"
+}
+
+# ---------------------------------------------------------------------------
+# 诊断报告 / 日志
+# ---------------------------------------------------------------------------
+page_diag() {
+    printf 'Content-Type: text/plain; charset=utf-8\r\n'
+    printf 'Content-Disposition: attachment; filename="r1c-diagnose-%s.txt"\r\n' "$(date +%Y%m%d-%H%M%S)"
+    printf 'Cache-Control: no-store\r\n\r\n'
+    r1c-diagnose 2>&1
+    exit 0
+}
+
+page_log() {
+    _t="${F_t:-${1:-}}"
+    [ "$_t" = wifi ] && _log=$WIFI_LOG || _log=$APPLY_LOG
+    _body=""
+    [ -f "$_log" ] && _body=$(cat "$_log")
+    _done=$(printf '%s' "$_body" | grep -c '^EXIT=')
+    html_head "应用日志" "$([ "$_done" = 0 ] && echo 3)"
+    if [ -n "$_body" ]; then
+        printf '<div class="card"><h2>%s</h2><pre>%s</pre>\n' "$(h "$_log")" "$(h "$_body")"
+        if [ "$_done" = 0 ]; then
+            printf '<div class="hint">执行中，页面每 3 秒刷新…</div>\n'
+        else
+            printf '<div class="hint">执行结束。%s</div>\n' \
+                "$(printf '%s' "$_body" | grep '^EXIT=' | grep -q 'EXIT=0' \
+                    && echo '<span class="dot up"></span>成功' \
+                    || echo '<span class="dot down"></span>请查看上面的错误')"
+        fi
+        printf '</div>\n'
+    else
+        printf '<div class="card"><div class="hint">暂无日志。到「站点与 PLC」或「WiFi 上行」保存一次后这里会出现输出。</div></div>\n'
+    fi
+    html_foot
+}
+
+# ---------------------------------------------------------------------------
+# 输出辅助
+# ---------------------------------------------------------------------------
+redirect() {
+    printf 'Status: 303 See Other\r\n'
+    printf 'Location: %s\r\n' "$1"
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    printf 'ok\n'
+    exit 0
+}
+
+fail() {
+    html_head "操作失败"
+    printf '<div class="card"><h2 style="color:#c62828">%s</h2>\n' "$(h "$1")"
+    printf '<div class="hint">配置已回滚到上一份备份。可到「运行状态」确认设备正常。</div></div>\n'
+    html_foot
+}
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+guard
+
+# 解析查询串
+PAGE=status
+QT=
+for kv in $(printf '%s' "${QUERY_STRING:-}" | tr '&' ' '); do
+    case "$kv" in
+        p=*) PAGE=$(urldecode "${kv#p=}") ;;
+        t=*) QT=$(urldecode "${kv#t=}") ;;
+    esac
+done
+
+# 解析 POST 表单（一次性读完 CONTENT_LENGTH，短读会把值截断）
+# ⚠️ 这里用显式 case 而不是 eval：
+#    密码类字段可能含双引号/反引号，拼进 eval 会把赋值语句本身搞坏（甚至执行代码）。
+#    字段全部白名单，未列出的键直接忽略。
+if [ "${REQUEST_METHOD:-}" = POST ]; then
+    _n=${CONTENT_LENGTH:-0}
+    if [ "$_n" -gt 0 ] 2>/dev/null; then
+        _post=$(head -c "$_n")
+        for kv in $(printf '%s' "$_post" | tr '&' ' '); do
+            _k=$(urldecode "${kv%%=*}")
+            _v=$(urldecode "${kv#*=}")
+            case "$_k" in
+                SITE_ID)                 F_SITE_ID=$_v ;;
+                PLC_ROLE)                F_PLC_ROLE=$_v ;;
+                PLC_NETWORK)             F_PLC_NETWORK=$_v ;;
+                PLC_LOCAL_IP)            F_PLC_LOCAL_IP=$_v ;;
+                PLC_DEVICES)             F_PLC_DEVICES=$_v ;;
+                PLC_SNAT)                F_PLC_SNAT=$_v ;;
+                WG_ENDPOINT)             F_WG_ENDPOINT=$_v ;;
+                WG_PEER_PUBLIC_KEY)      F_WG_PEER_PUBLIC_KEY=$_v ;;
+                VPN_ADDR)                F_VPN_ADDR=$_v ;;
+                WG_PEER_ALLOWED_IPS)     F_WG_PEER_ALLOWED_IPS=$_v ;;
+                WG_KEEPALIVE)            F_WG_KEEPALIVE=$_v ;;
+                ssid)                    F_ssid=$_v ;;
+                key)                     F_key=$_v ;;
+                enc)                     F_enc=$_v ;;
+                radio)                   F_radio=$_v ;;
+                enabled)                 F_enabled=$_v ;;
+            esac
+        done
+    fi
+fi
+
+case "$PAGE" in
+    status) page_status ;;
+    wifi)
+        if [ "${REQUEST_METHOD:-}" = POST ]; then wifi_save; else page_wifi; fi
+        ;;
+    site)
+        if [ "${REQUEST_METHOD:-}" = POST ]; then site_save; else page_site; fi
+        ;;
+    diag) page_diag ;;
+    log) page_log "$QT" ;;
+    *) redirect "?p=status" ;;
+esac
