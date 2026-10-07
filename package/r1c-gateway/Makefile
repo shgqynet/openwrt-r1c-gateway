@@ -56,6 +56,10 @@ define Package/r1c-gateway/install
 		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
 	$(INSTALL_BIN) ./files/etc/uci-defaults/91-r1c-luci-lang.sh \
 		$(1)/etc/uci-defaults/91-r1c-luci-lang.sh
+	# 5G 兜底应急 AP：现场换热点改了密码、隧道断掉时的最后一根稻草，
+	# 不用网线也能连上网关开本地管理页（详见脚本头注释）
+	$(INSTALL_BIN) ./files/etc/uci-defaults/92-r1c-emergency-ap.sh \
+		$(1)/etc/uci-defaults/92-r1c-emergency-ap.sh
 	# 本地应急管理页（http://<lan-ip>/cgi-bin/r1c）
 	#
 	# ⚠️ 不要改成 /usr/lib/lua/luci/ 下的 LuCI 页面：
