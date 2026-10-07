@@ -216,6 +216,7 @@ jobs:
           usr/bin/r1c-status \
           usr/bin/r1c-diagnose \
           usr/bin/r1c-test-plc \
+          usr/bin/r1c-wg-watchdog \
           etc/init.d/r1c-gateway \
           etc/r1c/site.conf \
           etc/uci-defaults/90-r1c-wireless-sta.sh \
@@ -242,6 +243,7 @@ jobs:
           usr/bin/r1c-status \
           usr/bin/r1c-diagnose \
           usr/bin/r1c-test-plc \
+          usr/bin/r1c-wg-watchdog \
           etc/init.d/r1c-gateway \
           etc/uci-defaults/90-r1c-wireless-sta.sh \
           etc/uci-defaults/91-r1c-luci-lang.sh

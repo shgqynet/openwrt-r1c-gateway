@@ -1,0 +1,64 @@
+#!/bin/sh
+# r1c-wg-watchdog —— WireGuard endpoint 域名重解析（应对 Hub 侧公网 IP 变化）
+#
+# 背景：WireGuard 内核只保存**解析后的 IP**，不会记住域名。
+#   uci 里 endpoint_host 写的是域名，但 `wg` 起来后内核里是 120.6.2.144 这样的地址。
+#   家宽公网 IP 一变（PPPoE 重拨），R1C 仍在向旧 IP 发握手包 -> 隧道永久死掉，
+#   且不会自愈（Hub 不知道 R1C 的新地址，也不会主动发包触发 WireGuard 的 roaming）。
+#   DDNS 只解决"域名指向新 IP"，解决不了"内核缓存旧 IP"，必须有本脚本。
+#
+# 行为（单次执行，无内部循环，由 /etc/init.d/r1c-gateway 主循环定期调用）：
+#   1. 域名解析结果与内核当前 endpoint 不同 -> 更新（IP 真的变了）
+#   2. 或超过 WG_HANDSHAKE_STALE 秒没握手 -> 强制重设（触发一次新的握手）
+#   3. 其余情况什么都不做 —— 零副作用、零抖动
+#
+# 安全：只做 `wg set ... endpoint`，无 mtd write、不改 flash、不碰 factory/Bdata。
+
+. /etc/r1c/site.conf 2>/dev/null || exit 0
+
+WG_IF="${WG_IF:-wg0}"
+STALE="${WG_HANDSHAKE_STALE:-180}"
+
+command -v wg >/dev/null 2>&1 || exit 0
+ip link show "$WG_IF" >/dev/null 2>&1 || exit 0
+
+# 定位 peer 的 uci section（形如 network.wg_peer=wireguard_wg0）
+# 注意：uci show 输出形如 network.wg_peer=wireguard_wg0，
+#   cut -d. -f2 会拿到 "wg_peer=wireguard_wg0" 整段，必须再用 cut -d= 截掉类型名
+SEC=$(uci show network 2>/dev/null | grep "=wireguard_${WG_IF}\$" | head -1 | cut -d. -f2 | cut -d= -f1)
+[ -n "$SEC" ] || exit 0
+
+PUB=$(uci -q get "network.$SEC.public_key")
+HOST=$(uci -q get "network.$SEC.endpoint_host")
+PORT=$(uci -q get "network.$SEC.endpoint_port")
+
+[ -n "$PUB" ] && [ -n "$HOST" ] && [ -n "$PORT" ] || exit 0
+
+# 纯 IP 的 endpoint 无需重解析
+case "$HOST" in
+    *[!0-9.]*) ;;
+    *) exit 0 ;;
+esac
+
+NEW=$(resolveip -4 "$HOST" 2>/dev/null | head -1)
+case "$NEW" in
+    ''|*[!0-9.]*) exit 0 ;;   # 解析失败（多半 WAN/DNS 还没就绪），本次跳过
+esac
+
+CUR=$(wg show "$WG_IF" endpoints 2>/dev/null | awk -v k="$PUB" '$1==k {print $2}')
+CUR_IP="${CUR%%:*}"
+
+LAST=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk -v k="$PUB" '$1==k {print $2}')
+[ -n "$LAST" ] || LAST=0
+NOW=$(date +%s 2>/dev/null || echo 0)
+AGE=$((NOW - LAST))
+
+if [ "$NEW" != "$CUR_IP" ]; then
+    wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
+    logger -t r1c-wg "endpoint 更新 ${CUR_IP:-none} -> ${NEW} (公网 IP 已变化)"
+elif [ "$AGE" -gt "$STALE" ]; then
+    wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
+    logger -t r1c-wg "握手超时 ${AGE}s，重设 endpoint ${NEW} 强制重连"
+fi
+
+exit 0

@@ -47,13 +47,16 @@ start_service() {
     procd_set_param command /bin/sh -c '
         . /etc/r1c/site.conf
         while true; do
-            # TODO(Phase 2+): 调用 r1c-gateway 主循环
+            # --- 已实现：WireGuard endpoint 域名重解析（家宽公网 IP 变化自愈）---
+            # 单次执行、无内部循环、正常情况下零副作用，详见脚本头注释
+            [ -x /usr/bin/r1c-wg-watchdog ] && /usr/bin/r1c-wg-watchdog
+
+            # TODO(Phase 2+): 其余主循环逻辑
             #   1. WAN/Internet 检测（UP + 网关 + DNS + 可达性）
             #   2. NTP 时间校验
-            #   3. VPN 状态检测与恢复
-            #   4. PLC 网络可达性检测（只 ping + TCP，禁止协议写操作）
-            #   5. LED 状态更新
-            #   6. 分级日志：SYSTEM / WAN / VPN / PLC / MODEM / SECURITY
+            #   3. PLC 网络可达性检测（只 ping + TCP，禁止协议写操作）
+            #   4. LED 状态更新
+            #   5. 分级日志：SYSTEM / WAN / VPN / PLC / MODEM / SECURITY
             sleep "${CHECK_INTERVAL:-30}"
         done
     '
