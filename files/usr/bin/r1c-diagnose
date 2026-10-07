@@ -13,6 +13,29 @@ REPORT="/tmp/r1c-diagnose-$(date +%Y%m%d-%H%M).txt"
 
 say() { echo "$1"; echo "$1" >> "$REPORT"; }
 
+# --- TCP 端口探活（需求 §51：只做连通性，不发任何工业协议命令） -------------
+# ⚠️ 踩坑：早期写法 `(echo > /dev/tcp/$ip/$port)` 是 **bash 特性**，
+#    busybox ash 没有 /dev/tcp → 永远失败 → 端口明明开着却报 "CLOSED or filtered"。
+#    这个假阴性比报错更危险：现场会照着报告去查 PLC，方向完全错。
+# 正确做法：busybox nc 直接连，退出码 0 = 通。但本机 nc 不支持 -w/-z
+#    （`nc --help` 只有 [IPADDR PORT]），且 busybox 无 timeout 小程序，
+#    因此用后台进程 + 定时 kill 自己做超时，避免对 filtered 端口永久阻塞。
+TCP_PROBE_TIMEOUT=3
+tcp_probe() {
+    _tp_ip="$1"; _tp_port="$2"
+    ( nc "$_tp_ip" "$_tp_port" </dev/null >/dev/null 2>&1 ) &
+    _tp_pid=$!
+    ( sleep "$TCP_PROBE_TIMEOUT"; kill -9 "$_tp_pid" 2>/dev/null ) &
+    _tp_kpid=$!
+    # 2>/dev/null：被 kill 时 job control 会往 stderr 打 "Killed"，污染报告
+    wait "$_tp_pid" 2>/dev/null
+    _tp_rc=$?
+    kill -9 "$_tp_kpid" 2>/dev/null
+    # 被 kill 说明超时（等价于 filtered），统一归一化为非 0
+    [ "$_tp_rc" = 0 ] || _tp_rc=1
+    return "$_tp_rc"
+}
+
 say "=============================================================="
 say " R1C Industrial Remote Gateway — Diagnostic Report"
 say " $(date)"
@@ -46,11 +69,24 @@ say "[5] Route to PLC"
 [ -n "${PLC_NETWORK:-}" ] && ip route get "${PLC_NETWORK%/*}" 2>/dev/null | while read -r l; do say "    $l"; done
 say ""
 
-say "[6] PLC Gateway (${PLC_GATEWAY:-UNSET})"
-[ -n "${PLC_GATEWAY:-}" ] && {
-    ping -c2 -W2 "$PLC_GATEWAY" >/dev/null 2>&1 && say "    PING OK" || say "    PING FAILED"
-    ip neigh show "$PLC_GATEWAY" 2>/dev/null | while read -r l; do say "    ARP: $l"; done
-}
+# ⚠️ host 模式下 PLC_GATEWAY 是出厂占位值（192.168.10.1），既不是本机也不一定存在，
+#    ping 它必然失败 —— 与 r1c-status 曾踩过的坑同源。这里按角色分两种措辞。
+if [ "${PLC_ROLE:-gateway}" = "host" ]; then
+    say "[6] PLC 网段（host 模式：R1C 占 ${PLC_LOCAL_IP:-UNSET}，不占用网关地址）"
+    say "    （PLC_GATEWAY=${PLC_GATEWAY:-UNSET} 为占位值，host 模式下不适用，已跳过）"
+    # 只看 PLC 网段内的 IPv4 邻居：WAN 侧(phy1-sta0)与 IPv6 链路本地地址对判断
+    # "PLC 挂上来没有"毫无帮助，列出来反而淹没有效信息。
+    _pfx=$(printf '%s' "${PLC_NETWORK:-}" | cut -d. -f1-3).
+    _nbrs=$(ip -4 neigh show 2>/dev/null | grep -E "REACHABLE|STALE|DELAY" | grep -c "^${_pfx}")
+    say "    网段 ${_pfx}0/24 内已学到的设备: ${_nbrs} 台"
+    ip -4 neigh show 2>/dev/null | grep -E "REACHABLE|STALE|DELAY" | grep "^${_pfx}" | while read -r l; do say "    $l"; done
+else
+    say "[6] PLC Gateway (${PLC_GATEWAY:-UNSET})"
+    [ -n "${PLC_GATEWAY:-}" ] && {
+        ping -c2 -W2 "$PLC_GATEWAY" >/dev/null 2>&1 && say "    PING OK" || say "    PING FAILED"
+        ip neigh show "$PLC_GATEWAY" 2>/dev/null | while read -r l; do say "    ARP: $l"; done
+    }
+fi
 say ""
 
 say "[7] PLC TCP ports (只做连通性，不发送任何工业协议命令)"
@@ -64,9 +100,11 @@ echo "${PLC_DEVICES:-}" | while IFS='|' read -r name ip type desc; do
         ab) port=44818 ;;
         *)  port=80 ;;
     esac
-    (echo > /dev/tcp/$ip/$port) >/dev/null 2>&1 \
-        && say "    $name ($ip) TCP/$port OPEN" \
-        || say "    $name ($ip) TCP/$port CLOSED or filtered"
+    if tcp_probe "$ip" "$port"; then
+        say "    $name ($ip) TCP/$port OPEN"
+    else
+        say "    $name ($ip) TCP/$port CLOSED or filtered"
+    fi
 done
 say ""
 

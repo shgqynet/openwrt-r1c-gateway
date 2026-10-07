@@ -310,6 +310,26 @@ emit set firewall.vpn2plc=forwarding
 emit set firewall.vpn2plc.src='vpn'
 emit set firewall.vpn2plc.dest='plc'
 
+# vpn zone 的 input 是 REJECT —— 这是有意的：VPN 侧不得随意触碰管理面。
+# 但远程维护是本项目的一等需求，工程师必须能从 VPN 侧 SSH 进 R1C 排障，
+# 否则设备一出问题就只能跑现场。因此按最小暴露放行两项：
+#   SSH(22) 与 ICMP echo-request，其余管理面（LuCI/HTTP 等）仍然拒绝。
+# 后续接入「远程维护开关 + 超时」后，这两条应由开关控制。
+emit set firewall.vpn_ssh=rule
+emit set firewall.vpn_ssh.name='Allow-VPN-SSH'
+emit set firewall.vpn_ssh.src='vpn'
+emit set firewall.vpn_ssh.proto='tcp'
+emit set firewall.vpn_ssh.dest_port='22'
+emit set firewall.vpn_ssh.family='ipv4'
+emit set firewall.vpn_ssh.target='ACCEPT'
+emit set firewall.vpn_icmp=rule
+emit set firewall.vpn_icmp.name='Allow-VPN-ICMP'
+emit set firewall.vpn_icmp.src='vpn'
+emit set firewall.vpn_icmp.proto='icmp'
+emit set firewall.vpn_icmp.icmp_type='echo-request'
+emit set firewall.vpn_icmp.family='ipv4'
+emit set firewall.vpn_icmp.target='ACCEPT'
+
 # PLC -> WAN: 按现场要求（默认 deny，§20）
 emit set firewall.plc2wan=forwarding
 emit set firewall.plc2wan.src='plc'
@@ -323,14 +343,20 @@ fi
 echo
 echo "[4/4] SNAT 策略（PLC_SNAT=${PLC_SNAT} → 实际 ${DO_SNAT}）"
 if [ "$DO_SNAT" = "1" ]; then
+    # ⚠️ 2026-10-07 真机踩坑：不能用「firewall.plc_snat=nat + src=vpn」这条独立 nat 规则。
+    # fw4 按 **src zone** 决定规则归属链，src='vpn' 会把它放进 srcnat_vpn，
+    # 而 srcnat_vpn 只在 **出口为 wg0** 时才被 jump —— 我们恰恰需要出口为 br-lan 时做 NAT，
+    # 结果规则永不命中（counter 恒为 0），工程师 ping PLC 全丢。
+    # 正确做法：在 **plc zone** 上开 masq，并用 masq_src 限定只对来自 VPN 网段的流量生效，
+    # 这样 fw4 生成的是 srcnat_plc（oifname br-lan）里的 `ip saddr <VPN网段> masquerade`。
     info "对 VPN→PLC 流量做源地址转换（host 模式下保证 PLC 回包经过 R1C）"
-    emit set firewall.plc_snat=nat
-    emit set firewall.plc_snat.name='plc-snat'
-    emit set firewall.plc_snat.src='vpn'
-    emit set firewall.plc_snat.dest_ip="${PLC_NETWORK}"
-    emit set firewall.plc_snat.target='MASQUERADE'
+    emit set firewall.plc.masq='1'
+    emit set firewall.plc.masq_src="${TUNNEL_NETS}"
+    emit -q delete firewall.plc_snat
 else
     info "不做 SNAT（gateway 模式下 PLC 网关即 R1C，回包天然经过本设备）"
+    emit set firewall.plc.masq='0'
+    emit -q delete firewall.plc.masq_src
     emit -q delete firewall.plc_snat
 fi
 
