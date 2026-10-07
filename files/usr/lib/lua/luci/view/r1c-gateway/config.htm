@@ -1,0 +1,96 @@
+<%+header%>
+
+<style>
+.r1c-box { max-width: 960px; }
+.r1c-msg { padding: 8px 12px; margin: 10px 0; border-radius: 4px; }
+.r1c-ok  { background: #e8f5e9; color: #1b5e20; border: 1px solid #a5d6a7; }
+.r1c-err { background: #ffebee; color: #b71c1c; border: 1px solid #ef9a9a; }
+.r1c-warn{ background: #fff8e1; color: #795548; border: 1px solid #ffe082; }
+.r1c-tip { color: #777; font-size: 12px; line-height: 1.5; }
+.r1c-badge { display:inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; }
+.r1c-on  { background:#e8f5e9; color:#1b5e20; }
+.r1c-off { background:#eceff1; color:#546e7a; }
+.r1c-k { font-family: monospace; }
+</style>
+
+<div class="cbi-map r1c-box">
+  <h2>R1C 网关 — 站点配置</h2>
+
+  <% if errmsg then %><div class="r1c-msg r1c-err"><%=pcdata(errmsg)%></div><% end %>
+  <% if msg then %><div class="r1c-msg r1c-ok"><%=pcdata(msg)%></div><% end %>
+
+  <div class="r1c-msg r1c-warn">
+    <strong>应用前必读</strong>：点「应用」会按本页配置重建网络与防火墙。
+    若 <span class="r1c-k">PLC 网段</span> 或 <span class="r1c-k">本机 IP</span> 被改动，
+    <b>本页会立刻失联</b>，需要用新 IP 重新打开后台 —— 这是预期行为，不是刷砖。
+    另外：在 LuCI「网络 → 接口」里手改 wg0 是<b>无效的</b>，下次 r1c-apply 会被本页配置覆盖回去。
+  </div>
+
+  <form method="post" action="<%=REQUEST_URI%>">
+    <div class="cbi-section">
+      <table class="cbi-section-table" style="width:100%">
+        <% for _, f in ipairs(fields) do %>
+        <tr class="cbi-value">
+          <td class="cbi-value-title" style="width:220px"><%=pcdata(f.label)%></td>
+          <td class="cbi-value-field" style="width:420px">
+            <% if f.type == "select" then %>
+              <select name="<%=f.name%>">
+                <% for _, o in ipairs(f.options) do %>
+                <option value="<%=pcdata(o)%>"<% if vals[f.key] == o then %> selected="selected"<% end %>><%=pcdata(o)%></option>
+                <% end %>
+              </select>
+            <% elseif f.type == "textarea" then %>
+              <textarea name="<%=f.name%>" rows="<%=f.rows or 3%>" style="width:100%;font-family:monospace"><%=pcdata(vals[f.key] or "")%></textarea>
+            <% elseif f.type == "password" then %>
+              <input type="password" name="<%=f.name%>" value="<%=pcdata(vals[f.key] or "")%>" style="width:100%" />
+            <% else %>
+              <input type="text" name="<%=f.name%>" value="<%=pcdata(vals[f.key] or "")%>" style="width:100%;font-family:monospace" />
+            <% end %>
+          </td>
+          <td class="cbi-value-description"><div class="r1c-tip"><%=pcdata(f.hint or "")%></div></td>
+        </tr>
+        <% end %>
+      </table>
+    </div>
+
+    <div class="cbi-section">
+      <h3>密钥（不写进 site.conf，落盘权限 600）</h3>
+      <table class="cbi-section-table" style="width:100%">
+        <tr class="cbi-value">
+          <td class="cbi-value-title" style="width:220px">本机私钥</td>
+          <td class="cbi-value-field" style="width:420px">
+            <textarea name="wg_private_key" rows="2" style="width:100%;font-family:monospace" placeholder="留空 = 不修改"></textarea>
+          </td>
+          <td class="cbi-value-description">
+            <div class="r1c-tip">
+              当前：
+              <% if has_priv then %><span class="r1c-badge r1c-on">已配置</span><% else %><span class="r1c-badge r1c-off">未配置（隧道起不来）</span><% end %>
+              <br />出于安全考虑页面<b>不回显</b>明文，只显示是否已配置。
+            </div>
+          </td>
+        </tr>
+        <tr class="cbi-value">
+          <td class="cbi-value-title">预共享密钥 PSK</td>
+          <td class="cbi-value-field">
+            <textarea name="wg_preshared_key" rows="2" style="width:100%;font-family:monospace" placeholder="留空 = 不修改"></textarea>
+          </td>
+          <td class="cbi-value-description">
+            <div class="r1c-tip">
+              当前：
+              <% if has_psk then %><span class="r1c-badge r1c-on">已配置</span><% else %><span class="r1c-badge r1c-off">未配置</span><% end %>
+              <br />两端必须一致，否则握手只显示 timeout，很难查。
+            </div>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="cbi-page-actions">
+      <input type="submit" name="save" value="保存配置" class="cbi-button cbi-button-save" />
+      <a href="<%=pcdata(apply_url)%>" class="cbi-button cbi-button-apply">去校验并应用</a>
+      <a href="<%=pcdata(status_url)%>" class="cbi-button cbi-button-link">查看运行状态</a>
+    </div>
+  </form>
+</div>
+
+<%+footer%>
