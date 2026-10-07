@@ -1,0 +1,10 @@
+{
+	"admin/r1c": {
+		"title": "R1C 工业网关",
+		"order": 15,
+		"action": {
+			"type": "view",
+			"path": "r1c/gateway"
+		}
+	}
+}

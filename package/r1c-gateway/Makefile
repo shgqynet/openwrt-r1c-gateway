@@ -62,9 +62,17 @@ define Package/r1c-gateway/install
 	#    24.10 的 luci-base 是 26.x 纯 JS 架构，菜单由 /usr/share/luci/menu.d/*.json
 	#    定义，不再扫描 Lua controller；而且本固件**没有 lua 解释器**，
 	#    menu.json 的 template action 渲染时直接报 "No Lua runtime installed"。
-	#    本页是纯 busybox ash 的 CGI，零新增依赖。
+	#    本页是纯 busybox ash 的 CGI，零新增依赖 —— 隧道断了照样能开。
 	$(INSTALL_DIR) $(1)/www/cgi-bin
 	$(INSTALL_BIN) ./files/www/cgi-bin/r1c $(1)/www/cgi-bin/r1c
+	# LuCI 菜单入口：把上面的 CGI 页嵌进后台（不是重写成 LuCI 表单，理由同上）。
+	# 缺了 menu.d 这一项，页面能打开但后台目录里看不到入口（2026-10-07 踩）。
+	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
+	$(INSTALL_DATA) ./files/usr/share/luci/menu.d/luci-app-r1c.json \
+		$(1)/usr/share/luci/menu.d/luci-app-r1c.json
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/r1c
+	$(INSTALL_DATA) ./files/www/luci-static/resources/view/r1c/gateway.js \
+		$(1)/www/luci-static/resources/view/r1c/gateway.js
 endef
 
 define Package/r1c-gateway/postinst
