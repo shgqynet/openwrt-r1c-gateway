@@ -48,6 +48,7 @@ define Package/r1c-gateway/install
 	$(INSTALL_BIN) ./files/usr/bin/r1c-diagnose $(1)/usr/bin/r1c-diagnose
 	$(INSTALL_BIN) ./files/usr/bin/r1c-test-plc $(1)/usr/bin/r1c-test-plc
 	$(INSTALL_BIN) ./files/usr/bin/r1c-apply $(1)/usr/bin/r1c-apply
+	$(INSTALL_BIN) ./files/usr/bin/r1c-wg-watchdog $(1)/usr/bin/r1c-wg-watchdog
 	$(INSTALL_DIR) $(1)/etc/r1c
 	$(INSTALL_CONF) ./files/etc/r1c/site.conf $(1)/etc/r1c/site.conf
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
