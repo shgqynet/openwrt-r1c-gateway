@@ -1,0 +1,46 @@
+<%+header%>
+
+<style>
+.r1c-box { max-width: 960px; }
+.r1c-msg { padding: 8px 12px; margin: 10px 0; border-radius: 4px; }
+.r1c-warn{ background: #fff8e1; color: #795548; border: 1px solid #ffe082; }
+.r1c-run { background: #e3f2fd; color: #0d47a1; border: 1px solid #90caf9; }
+.r1c-out { background: #263238; color: #cfd8dc; padding: 12px; border-radius: 4px;
+           font-family: monospace; font-size: 12px; white-space: pre-wrap;
+           max-height: 460px; overflow: auto; }
+</style>
+
+<div class="cbi-map r1c-box">
+  <h2>R1C 网关 — 应用与校验</h2>
+
+  <% if running then %>
+    <div class="r1c-msg r1c-run">
+      应用正在后台执行（页面每 3 秒自动刷新）。
+      若 PLC 网段/本机 IP 有变化，完成后本页会失联 —— 用新 IP 重新打开即可，不是故障。
+    </div>
+    <script type="text/javascript">setTimeout(function(){ location.reload(); }, 3000);</script>
+  <% else %>
+    <div class="r1c-msg r1c-warn">
+      <b>校验（--check）</b>只做检查、不改任何配置，可以放心点。
+      <b>应用</b>会重建网络与防火墙：LAN 网段可能变化导致本页失联，属预期行为。
+    </div>
+  <% end %>
+
+  <div class="cbi-page-actions">
+    <form method="post" action="<%=REQUEST_URI%>" style="display:inline">
+      <input type="hidden" name="do" value="check" />
+      <input type="submit" value="校验配置（不改动）" class="cbi-button cbi-button-apply" />
+    </form>
+    <form method="post" action="<%=REQUEST_URI%>" style="display:inline"
+          onsubmit="return confirm('应用会重建网络与防火墙，可能导致本页失联（LAN 网段变化时）。确认继续？');">
+      <input type="hidden" name="do" value="apply" />
+      <input type="submit" value="应用配置（会重建网络）" class="cbi-button cbi-button-reset" />
+    </form>
+    <a href="<%=pcdata(config_url)%>" class="cbi-button cbi-button-link">回到站点配置</a>
+  </div>
+
+  <h3>最近一次执行输出</h3>
+  <div class="r1c-out"><%=pcdata(out or "(尚无执行记录)")%></div>
+</div>
+
+<%+footer%>

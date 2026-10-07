@@ -56,6 +56,19 @@ define Package/r1c-gateway/install
 		$(1)/etc/uci-defaults/90-r1c-wireless-sta.sh
 	$(INSTALL_BIN) ./files/etc/uci-defaults/91-r1c-luci-lang.sh \
 		$(1)/etc/uci-defaults/91-r1c-luci-lang.sh
+	# LuCI 页面：站点配置 / 应用与校验 / 运行状态。
+	# 用 INSTALL_DATA(0644) 而非 INSTALL_BIN —— lua/htm 不需要执行位，
+	# 给 +x 反而会误导后面看权限的人。
+	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/controller
+	$(INSTALL_DATA) ./files/usr/lib/lua/luci/controller/r1c-gateway.lua \
+		$(1)/usr/lib/lua/luci/controller/r1c-gateway.lua
+	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/view/r1c-gateway
+	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/config.htm \
+		$(1)/usr/lib/lua/luci/view/r1c-gateway/config.htm
+	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/apply.htm \
+		$(1)/usr/lib/lua/luci/view/r1c-gateway/apply.htm
+	$(INSTALL_DATA) ./files/usr/lib/lua/luci/view/r1c-gateway/status.htm \
+		$(1)/usr/lib/lua/luci/view/r1c-gateway/status.htm
 endef
 
 define Package/r1c-gateway/postinst

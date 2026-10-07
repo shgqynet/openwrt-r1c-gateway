@@ -6,6 +6,118 @@
 CONF="/etc/r1c/site.conf"
 [ -f "$CONF" ] && . "$CONF"
 
+# ---------------------------------------------------------------- JSON 模式
+# 用法：r1c-status --json
+# 供 LuCI「运行状态」页轮询（需求 §50 的可视化延伸）。
+#
+# 设计取舍：这是**独立分支**，不改上面的可读输出一行代码。
+# 理由：可读版是现场排障时最常敲的命令，重构它等于把"正在用的工具"置于风险中，
+# 收益却只是少复制几行。宁可重复一点，也不要改坏。
+#
+# ⚠️ 两个 busybox 坑（与 r1c-diagnose 同源）：
+#   1) nc 不支持 -w/-z，且系统没有 timeout 小程序 → 后台进程 + 定时 kill 自造超时
+#   2) wait 被 kill 时会往 stderr 打 "Killed" → 必须 2>/dev/null，否则 JSON 被污染
+if [ "${1:-}" = "--json" ]; then
+    _esc() { printf '%s' "${1:-}" | tr -d '"\\'; }
+    _f() { printf ',"%s":"%s"' "$1" "$(_esc "$2")"; }
+
+    _now=$(date +%s)
+
+    # --- WAN ---
+    _def=$(ip -4 route show default 2>/dev/null | head -1)
+    _wanif=$(printf '%s' "$_def" | sed -E 's/.*dev ([^ ]+).*/\1/')
+    _wangw=$(printf '%s' "$_def" | sed -E 's/.*via ([^ ]+).*/\1/')
+    _wanip=""
+    [ -n "$_wanif" ] && _wanip=$(ip -4 addr show dev "$_wanif" 2>/dev/null \
+        | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+
+    # --- WireGuard ---
+    _wgif=""
+    for _i in $(uci -q show network | grep -oE "network\.[a-z0-9_]+" | cut -d. -f2 | sort -u); do
+        if [ "$(uci -q get network."$_i".proto 2>/dev/null)" = "wireguard" ]; then
+            _wgif="$_i"; break
+        fi
+    done
+    _wglp=0; _wgpk=""; _wgpeer=""; _wgep=""; _wgh=0; _wgrx=0; _wgtx=0; _wgka=""
+    if [ -n "$_wgif" ] && command -v wg >/dev/null 2>&1; then
+        _wglp=$(wg show "$_wgif" listen-port 2>/dev/null);  _wglp=${_wglp:-0}
+        _wgpk=$(wg show "$_wgif" public-key 2>/dev/null)
+        _wgpeer=$(wg show "$_wgif" peers 2>/dev/null | head -1)
+        _wgep=$(wg show "$_wgif" endpoints 2>/dev/null | awk 'NR==1{print $2}')
+        _wgh=$(wg show "$_wgif" latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
+        _wgh=${_wgh:-0}
+        _wgrx=$(wg show "$_wgif" transfer 2>/dev/null | awk 'NR==1{print $2}'); _wgrx=${_wgrx:-0}
+        _wgtx=$(wg show "$_wgif" transfer 2>/dev/null | awk 'NR==1{print $3}'); _wgtx=${_wgtx:-0}
+        # peer 段：uci 里类型是 wireguard_<接口名>。这里只取 keepalive（演示用）
+        for _p in $(uci -q show network \
+            | grep -oE "network\.[a-z0-9_]+=wireguard_${_wgif}" | cut -d. -f2 | cut -d= -f1); do
+            _wgka=$(uci -q get network."$_p".persistent_keepalive 2>/dev/null)
+            [ -n "$_wgka" ] && break
+        done
+    fi
+    _vip=""
+    [ -n "$_wgif" ] && _vip=$(ip -4 addr show dev "$_wgif" 2>/dev/null \
+        | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    # 从未握手时 age 给 -1，前端显示"从未握手"，比显示一个巨大的秒数好读
+    _hsa=-1
+    [ "${_wgh:-0}" -gt 0 ] 2>/dev/null && _hsa=$((_now - _wgh))
+
+    printf '{"ok":true'
+    printf ',"ts":%s' "$_now"
+    _f site        "${SITE_ID:-}"
+    _f hostname    "$(cat /proc/sys/kernel/hostname)"
+    _f role        "${PLC_ROLE:-gateway}"
+    _f plc_network "${PLC_NETWORK:-}"
+    _f plc_local_ip "${PLC_LOCAL_IP:-}"
+    _f plc_gateway "${PLC_GATEWAY:-}"
+    _f lan_applied "$(uci -q get network.lan.ipaddr 2>/dev/null)"
+    _f vpn_mode    "${VPN_MODE:-}"
+    _f vpn_addr    "${VPN_ADDR:-}"
+    _f vpn_ip      "$_vip"
+    _f endpoint_conf "${WG_ENDPOINT:-}"
+    _f wan_iface   "$_wanif"
+    _f wan_ip      "$_wanip"
+    _f wan_gw      "$_wangw"
+    _f internet    "$([ -n "$_def" ] && echo online || echo offline)"
+    _f uptime      "$(uptime | sed 's/^.*up //; s/,.*//')"
+    printf ',"wg":{"iface":"%s","listen_port":%s,"public_key":"%s","peer":"%s"' \
+        "$(_esc "$_wgif")" "$_wglp" "$(_esc "$_wgpk")" "$(_esc "$_wgpeer")"
+    printf ',"endpoint":"%s","last_handshake":%s,"handshake_age":%s' \
+        "$(_esc "$_wgep")" "$_wgh" "$_hsa"
+    printf ',"rx":%s,"tx":%s,"keepalive":"%s"}' "$_wgrx" "$_wgtx" "$(_esc "$_wgka")"
+
+    # --- PLC 设备清单探活 ---
+    # 最多 10 台，避免清单很长时把轮询拖成十几秒
+    printf ',"devices":['
+    _list=$(printf '%s\n' "${PLC_DEVICES:-}" | grep -v '^[[:space:]]*$' | grep -v '^#')
+    _cnt=0
+    while IFS='|' read -r _dn _dip _dt _dd; do
+        case "${_dn:-}" in ''|\#*) continue ;; esac
+        [ -n "${_dip:-}" ] || continue
+        _cnt=$((_cnt + 1))
+        [ "$_cnt" -gt 10 ] && break
+        case "${_dt:-}" in
+            s7) _dp=102 ;;
+            ab) _dp=44818 ;;
+            *)  _dp=80 ;;
+        esac
+        ping -c1 -W1 "$_dip" >/dev/null 2>&1 && _ic=up || _ic=down
+        ( nc "$_dip" "$_dp" </dev/null >/dev/null 2>&1 ) & _tp=$!
+        ( sleep 2; kill -9 "$_tp" 2>/dev/null ) & _tk=$!
+        wait "$_tp" 2>/dev/null; _trc=$?
+        kill -9 "$_tk" 2>/dev/null
+        [ "$_trc" = 0 ] && _tc=open || _tc=closed
+        [ "$_cnt" -gt 1 ] && printf ','
+        printf '{"name":"%s","ip":"%s","type":"%s","port":%s,"icmp":"%s","tcp":"%s"}' \
+            "$(_esc "$_dn")" "$(_esc "$_dip")" "$(_esc "${_dt:-}")" "$_dp" "$_ic" "$_tc"
+    done <<EOF
+${_list}
+EOF
+    printf ']'
+    printf '}\n'
+    exit 0
+fi
+
 echo "=============================================="
 echo " Xiaomi R1C — Industrial Remote Gateway"
 echo "=============================================="

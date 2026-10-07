@@ -220,7 +220,11 @@ jobs:
           etc/init.d/r1c-gateway \
           etc/r1c/site.conf \
           etc/uci-defaults/90-r1c-wireless-sta.sh \
-          etc/uci-defaults/91-r1c-luci-lang.sh
+          etc/uci-defaults/91-r1c-luci-lang.sh \
+          usr/lib/lua/luci/controller/r1c-gateway.lua \
+          usr/lib/lua/luci/view/r1c-gateway/config.htm \
+          usr/lib/lua/luci/view/r1c-gateway/apply.htm \
+          usr/lib/lua/luci/view/r1c-gateway/status.htm
         do
           if [ -e "$ROOTFS/$f" ]; then
             echo "  ✅ $f"
