@@ -529,6 +529,14 @@ else
         # 保证"主用掉了至少还有备份"这条底线。
         emit set "network.$_iface.metric=$_metric"
 
+        # ⚠️ 必须清掉 defaultroute=0 / peerdns=0 这类"只拿地址不拿路由"的限制。
+        #    调试 4G 时常有人（包括我）为了防止抢现有上行而临时加上它，
+        #    但多 WAN 场景下每个接口都**必须**拿到默认路由，由 metric 决定谁生效：
+        #    留着 defaultroute=0 的表现是"接口明明在线、ping 得通，mwan3 却判它 offline"，
+        #    排查起来非常费劲。这里统一清理，保证 apply 一次就能真正启用。
+        emit -q delete "network.$_iface.defaultroute"
+        emit -q delete "network.$_iface.peerdns"
+
         if [ -n "$WAN_ZONE" ]; then
             case " $(uci -q get "firewall.$WAN_ZONE.network" 2>/dev/null) " in
                 *" $_iface "*) : ;;
