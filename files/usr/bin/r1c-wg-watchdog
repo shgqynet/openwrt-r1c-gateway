@@ -2,15 +2,26 @@
 # r1c-wg-watchdog —— WireGuard endpoint 域名重解析（应对 Hub 侧公网 IP 变化）
 #
 # 背景：WireGuard 内核只保存**解析后的 IP**，不会记住域名。
-#   uci 里 endpoint_host 写的是域名，但 `wg` 起来后内核里是 120.6.2.144 这样的地址。
+#   uci 里 endpoint_host 写的是域名，但 `wg` 起来后内核里是 120.6.2.44 这样的地址。
 #   家宽公网 IP 一变（PPPoE 重拨），R1C 仍在向旧 IP 发握手包 -> 隧道永久死掉，
 #   且不会自愈（Hub 不知道 R1C 的新地址，也不会主动发包触发 WireGuard 的 roaming）。
 #   DDNS 只解决"域名指向新 IP"，解决不了"内核缓存旧 IP"，必须有本脚本。
 #
+# 2026-10-08 加固（现场故障复盘：Hub 重拨换 IP，隧道断 37 分钟没自愈）：
+#   老版本只用 `resolveip` 解析，且**解析失败就 exit 0 静默跳过** —— 连"握手超时
+#   强制重连"那条兜底都不执行。于是只要本地 DNS 抽一次风（或 busybox 压根没把
+#   resolveip 编进来），隧道就永久死等，直到有人到现场手动改。现在改成：
+#     1. 多路解析：resolveip -> nslookup(223.5.5.5) -> nslookup(119.29.29.29)
+#        -> nslookup(114.114.114.114) -> ping 的解析行
+#     2. 每步都带超时保护（busybox 没有 timeout 命令，用后台进程 + sleep + kill 实现）
+#        —— 否则 DNS 服务器不可达时 getaddrinfo 会一直卡住，把 init.d 主循环整个拖死
+#     3. 全部解析失败也**不再静默**：限流记日志告警，并用"上次解析成功的 IP"强制重连
+#
 # 行为（单次执行，无内部循环，由 /etc/init.d/r1c-gateway 主循环定期调用）：
 #   1. 域名解析结果与内核当前 endpoint 不同 -> 更新（IP 真的变了）
 #   2. 或超过 WG_HANDSHAKE_STALE 秒没握手 -> 强制重设（触发一次新的握手）
-#   3. 其余情况什么都不做 —— 零副作用、零抖动
+#   3. 解析失败 -> 限流告警 + 用上次已知 IP 兜底重连（不再永久死等）
+#   4. 其余情况什么都不做 —— 零副作用、零抖动
 #
 # 安全：只做 `wg set ... endpoint`，无 mtd write、不改 flash、不碰 factory/Bdata。
 
@@ -18,6 +29,9 @@
 
 WG_IF="${WG_IF:-wg0}"
 STALE="${WG_HANDSHAKE_STALE:-180}"
+STATE="/tmp/r1c-wg-lastip"      # 上次解析成功的 IP（解析全挂时用它兜底）
+TMPRES="/tmp/r1c-wg-dns.out"
+FAILCNT="/tmp/r1c-wg-dnsfail"
 
 command -v wg >/dev/null 2>&1 || exit 0
 ip link show "$WG_IF" >/dev/null 2>&1 || exit 0
@@ -40,10 +54,61 @@ case "$HOST" in
     *) exit 0 ;;
 esac
 
-NEW=$(resolveip -4 "$HOST" 2>/dev/null | head -1)
-case "$NEW" in
-    ''|*[!0-9.]*) exit 0 ;;   # 解析失败（多半 WAN/DNS 还没就绪），本次跳过
-esac
+# ---- 带超时地跑一条命令，输出落到 $TMPRES（busybox 无 timeout，后台 + kill 实现）----
+run_limited() {
+    # $1 = 最多等几秒；其余 = 命令与参数
+    RL_T=$1
+    shift
+    : > "$TMPRES"
+    ( "$@" > "$TMPRES" 2>/dev/null ) &
+    RL_P=$!
+    RL_I=0
+    while [ "$RL_I" -lt "$RL_T" ]; do
+        kill -0 "$RL_P" 2>/dev/null || break
+        sleep 1
+        RL_I=$((RL_I + 1))
+    done
+    kill "$RL_P" 2>/dev/null
+    wait "$RL_P" 2>/dev/null
+}
+
+# 从输出里挑一个 IPv4（$1 = 要排除的 IP，通常是 DNS 服务器自己那一行）
+pick_ip() {
+    grep -oE "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" "$TMPRES" 2>/dev/null \
+        | grep -v "^${1}$" | head -1
+}
+
+NEW=""
+HOW=""
+
+# 1) 系统 DNS（busybox resolveip，可能没编进来，所以后面还有兜底）
+if command -v resolveip >/dev/null 2>&1; then
+    run_limited 6 resolveip -4 -t 4 "$HOST"
+    NEW=$(pick_ip "")
+    [ -n "$NEW" ] && HOW="resolveip"
+    if [ -z "$NEW" ]; then          # 老 busybox 不认 -t，再试一次不带 -t 的形式
+        run_limited 6 resolveip -4 "$HOST"
+        NEW=$(pick_ip "")
+        [ -n "$NEW" ] && HOW="resolveip"
+    fi
+fi
+
+# 2) 三家公共 DNS 直查（绕开本地 DNS 缓存 / 劫持 / 不可达）
+if [ -z "$NEW" ] && command -v nslookup >/dev/null 2>&1; then
+    for D in 223.5.5.5 119.29.29.29 114.114.114.114; do
+        run_limited 5 nslookup "$HOST" "$D"
+        NEW=$(pick_ip "$D")
+        if [ -n "$NEW" ]; then HOW="nslookup@$D"; break; fi
+    done
+fi
+
+# 3) 最后退路：ping 的解析行（"PING host (1.2.3.4): 56 data bytes"）
+if [ -z "$NEW" ] && command -v ping >/dev/null 2>&1; then
+    run_limited 6 ping -c 1 -W 2 "$HOST"
+    NEW=$(grep -oE "\([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\)" "$TMPRES" 2>/dev/null \
+        | tr -d "()" | head -1)
+    [ -n "$NEW" ] && HOW="ping"
+fi
 
 CUR=$(wg show "$WG_IF" endpoints 2>/dev/null | awk -v k="$PUB" '$1==k {print $2}')
 CUR_IP="${CUR%%:*}"
@@ -53,12 +118,35 @@ LAST=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk -v k="$PUB" '$1==k {
 NOW=$(date +%s 2>/dev/null || echo 0)
 AGE=$((NOW - LAST))
 
-if [ "$NEW" != "$CUR_IP" ]; then
-    wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
-    logger -t r1c-wg "endpoint 更新 ${CUR_IP:-none} -> ${NEW} (公网 IP 已变化)"
-elif [ "$AGE" -gt "$STALE" ]; then
-    wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
-    logger -t r1c-wg "握手超时 ${AGE}s，重设 endpoint ${NEW} 强制重连"
+if [ -n "$NEW" ]; then
+    # 解析成功：记住结果、清失败计数
+    if [ "$NEW" != "$(cat "$STATE" 2>/dev/null)" ]; then
+        echo "$NEW" > "$STATE"
+    fi
+    : > "$FAILCNT"
+
+    if [ "$NEW" != "$CUR_IP" ]; then
+        wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
+        logger -t r1c-wg "endpoint 更新 ${CUR_IP:-none} -> ${NEW}（经 ${HOW}，公网 IP 已变化）"
+    elif [ "$AGE" -gt "$STALE" ]; then
+        wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
+        logger -t r1c-wg "握手超时 ${AGE}s，重设 endpoint ${NEW} 强制重连"
+    fi
+else
+    # 解析全挂：绝不静默退出。限流告警（每 20 次约 10 分钟一条，避免刷爆日志），
+    # 并用上次解析成功的 IP 兜底重连 —— 至少保持"一直在尝试"，而不是永久死等。
+    N=$(cat "$FAILCNT" 2>/dev/null)
+    [ -n "$N" ] || N=0
+    N=$((N + 1))
+    echo "$N" > "$FAILCNT"
+    if [ $((N % 20)) -eq 1 ]; then
+        logger -t r1c-wg "警告：${HOST} 解析失败（连续 ${N} 次），当前 endpoint ${CUR_IP:-none}，握手已停 ${AGE}s"
+    fi
+    OLD=$(cat "$STATE" 2>/dev/null)
+    if [ -n "$OLD" ] && [ "$AGE" -gt "$STALE" ]; then
+        wg set "$WG_IF" peer "$PUB" endpoint "${OLD}:${PORT}" 2>/dev/null
+        logger -t r1c-wg "解析失败兜底：用上次已知 IP ${OLD} 强制重连（握手已停 ${AGE}s）"
+    fi
 fi
 
 exit 0

@@ -246,6 +246,24 @@ Two things in this design break that loop:
 > If the site requires zero wireless exposure after servicing:
 > `uci set wireless.r1c_ap.disabled=1; uci commit wireless; wifi reload`
 
+### Hub's public IP changed (home broadband redial) — how long is the tunnel down?
+
+In principle **nothing to do**: `r1c-wg-watchdog` re-resolves the `endpoint_host` domain every 30 seconds and
+calls `wg set` when the result differs from the IP cached in the kernel — WireGuard's kernel only stores an
+IP, so an updated DDNS record does **not** make the kernel follow along.
+
+Fixed on 2026-10-08 after a real outage: the old version only used `resolveip` and **silently skipped on
+failure**, skipping even the "handshake timed out, force reconnect" fallback — one hiccup of local DNS and
+the tunnel waited **forever** until someone went on site. Now it:
+
+1. **Tries several resolvers**: system DNS → `223.5.5.5` → `119.29.29.29` → `114.114.114.114` → `ping` output
+2. **Bounds every step with a timeout** (busybox has no `timeout`; done with a background job + `sleep` +
+   `kill`) — otherwise an unreachable DNS server makes `getaddrinfo` hang and stalls the whole main loop
+3. **Never fails silently**: rate-limited warning (1 per ~20 runs, i.e. ~10 min) plus a forced reconnect to
+   the last known-good IP
+
+Debug it with `logread | grep r1c-wg` — look for "endpoint 更新/updated" vs "解析失败/resolve failed".
+
 ---
 
 ## 7. Command-line tools
