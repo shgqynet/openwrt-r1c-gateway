@@ -181,7 +181,7 @@ r1c-apply             # apply for real: reloads network/firewall, no reboot
 | Parameter | Default | Notes |
 | --- | --- | --- |
 | `PLC_WAN_ACCESS` | `deny` | Blocks the PLC side from reaching the Internet |
-| `VPN_HTTP_ACCESS` | `deny` | Whether the admin UI is reachable over the VPN. **Run `passwd root` before setting `allow`** — with no password set, `r1c-apply` refuses to open the UI and warns you, which avoids shipping an exposed box |
+| `VPN_HTTP_ACCESS` | `allow` | Whether the admin UI is reachable over the VPN. Ships as `allow`, so the UI opens as soon as the tunnel is up; set `deny` to lock it down. Opening it is **never unconditional**: with no root password set, `r1c-apply` still refuses and warns |
 | `REMOTE_MAINTENANCE` | `disabled` | Remote maintenance toggle and timeout |
 
 ### Multiple uplinks and failover (4G is a backup by default)
@@ -275,7 +275,7 @@ openwrt-r1c-gateway/
 ├── files/                          # rootfs overlay — new files MUST be registered in the Makefile install section
 │   ├── etc/r1c/site.conf           #   the single source of truth for site config (placeholders)
 │   ├── etc/init.d/r1c-gateway      #   procd main-loop service
-│   ├── etc/uci-defaults/           #   90 STA template / 91 LuCI zh-CN / 92 emergency AP
+│   ├── etc/uci-defaults/           #   90 STA template / 91 LuCI zh-CN / 92 emergency AP / 93 factory root pw
 │   ├── lib/upgrade/keep.d/         #   preserve /etc/r1c/ across upgrades
 │   ├── usr/bin/                    #   r1c-status / apply / diagnose / test-plc / wg-watchdog
 │   ├── usr/share/luci/menu.d/      #   LuCI menu entry
@@ -320,9 +320,17 @@ is a separate component and is **not part of this repository**.
 ### FAQ
 
 **Q: I can ping the R1C but can't open its web UI.**
-A: The `vpn` firewall zone defaults to `input REJECT`, allowing only SSH (22) and ICMP. Set
-`VPN_HTTP_ACCESS=allow` (after `passwd root`). Note this governs access **to the R1C itself**; reaching
-**other devices** on the subnet (PLC, HMI) goes through the forward chain, which has **no port filtering** at all.
+A: The `vpn` firewall zone defaults to `input REJECT`, allowing only SSH (22) and ICMP; ports 80/443 need
+`VPN_HTTP_ACCESS=allow` (which is the factory value). Check two things: ① the value in `site.conf` — and run
+`r1c-apply` after changing it; ② whether root has a password — with none set, `r1c-apply` refuses to open it.
+Note this governs access **to the R1C itself**; reaching **other devices** on the subnet (PLC, HMI) goes
+through the forward chain, which has **no port filtering** at all.
+
+**Q: What is the factory root password?**
+A: A public default password is baked into the image (written on first boot by
+`uci-defaults/93-r1c-root-password.sh`; only the hash lives in the repo). **Change it with `passwd` once the
+box is on site.** The script only writes when root has no password yet, so a customized password is never
+overwritten by an upgrade.
 
 **Q: Handshake looks fine but the PLC is unreachable.**
 A: Usually a multi-site **subnet collision** — the same CIDR assigned to two peers makes WireGuard silently

@@ -169,7 +169,7 @@ r1c-apply             # 真正落地，reload 网络/防火墙，不重启
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `PLC_WAN_ACCESS` | `deny` | 禁止 PLC 侧主动访问公网 |
-| `VPN_HTTP_ACCESS` | `deny` | 是否允许从 VPN 侧打开管理后台。**设 `allow` 前必须先 `passwd root`** —— 未设密码时 `r1c-apply` 会拒绝放行并告警，避免出厂裸奔 |
+| `VPN_HTTP_ACCESS` | `allow` | 是否允许从 VPN 侧打开管理后台。出厂为 `allow`，连上隧道即可开后台；要收口改 `deny`。放行**不是无条件的**：root 无密码时 `r1c-apply` 仍会拒绝放行并告警 |
 | `REMOTE_MAINTENANCE` | `disabled` | 远程维护开关与超时 |
 
 ### 多上行与自动切换（4G 默认作备用）
@@ -257,7 +257,7 @@ openwrt-r1c-gateway/
 ├── files/                          # rootfs overlay —— 新文件必须在 Makefile install 段登记
 │   ├── etc/r1c/site.conf           #   现场配置唯一真相源（占位值）
 │   ├── etc/init.d/r1c-gateway      #   procd 主循环服务
-│   ├── etc/uci-defaults/           #   90 STA 模板 / 91 LuCI 中文 / 92 应急 AP
+│   ├── etc/uci-defaults/           #   90 STA 模板 / 91 LuCI 中文 / 92 应急 AP / 93 出厂 root 密码
 │   ├── lib/upgrade/keep.d/         #   升级保留 /etc/r1c/
 │   ├── usr/bin/                    #   r1c-status / apply / diagnose / test-plc / wg-watchdog
 │   ├── usr/share/luci/menu.d/      #   LuCI 菜单入口
@@ -301,9 +301,14 @@ openwrt-r1c-gateway/
 ### FAQ
 
 **Q：能 ping 通 R1C，但打不开后台？**
-A：`firewall.vpn` 区的 input 默认是 REJECT，只放行 SSH(22) 与 ICMP。要开管理页请设 `VPN_HTTP_ACCESS=allow`
-（前提是已 `passwd root`）。注意这只影响**访问 R1C 自己**；访问网段内**其他设备**（PLC、HMI）走的是 forward 链，
-那里没有任何端口限制。
+A：`firewall.vpn` 区的 input 默认是 REJECT，只放行 SSH(22) 与 ICMP，80/443 需要 `VPN_HTTP_ACCESS=allow`
+（出厂即是）。确认两件事：① `site.conf` 里该值是否为 `allow`，改完要 `r1c-apply`；
+② root 是否已设密码 —— 无密码时 `r1c-apply` 会拒绝放行。
+注意这只影响**访问 R1C 自己**；访问网段内**其他设备**（PLC、HMI）走的是 forward 链，那里没有任何端口限制。
+
+**Q：出厂 root 密码是什么？**
+A：固件内置一个公开的默认密码（首次开机由 `uci-defaults/93-r1c-root-password.sh` 写入，仓库里只存哈希）。
+**现场部署后必须 `passwd` 改掉**。脚本只在 root 尚无密码时写入，改过的设备升级后不会被覆盖。
 
 **Q：为什么握手正常但 ping 不通 PLC？**
 A：多半是多站点**网段撞车** —— 同一个 CIDR 被配给了两个 peer，WireGuard 会静默丢掉最后一个。

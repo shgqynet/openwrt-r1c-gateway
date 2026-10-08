@@ -332,10 +332,12 @@ emit set firewall.vpn_icmp.target='ACCEPT'
 
 # VPN 侧管理后台（LuCI / 本地应急管理页跑 HTTP 80，uhttpd 另有 443）
 #
-# ⚠️ 出厂必须是 deny。新刷出来的设备 root 是**空密码**，一旦无条件放行，
-#    任何握到 WG 密钥/PSK 的对端都能匿名登录后台改配置 —— 管理面等于裸奔。
-#    所以这里做成 site.conf 显式开关，外加一道硬校验：root 没有密码哈希时，
-#    即便填了 allow 也拒绝放行（2026-10-08 定；这条原则别放宽）。
+# 出厂值是 allow（2026-10-08 定：现场要远程开后台，刷完还要再手动放行太折腾），
+# 前提是固件带出厂 root 密码（uci-defaults/93-r1c-root-password.sh 首次开机写入）。
+#
+# ⚠️ 但放行**永远不是无条件的**：下面先查 /etc/shadow 里 root 的密码哈希，
+#    空 / 锁定（! 开头）/ 禁止密码登录（*）一律拒绝放行并告警。
+#    新刷出来的设备若 root 被清空密码，管理面绝不能裸奔给隧道对端 —— 这条原则别放宽。
 emit_vpn_http_rule() {
     emit set firewall.vpn_http=rule
     emit set firewall.vpn_http.name='Allow-VPN-HTTP'
@@ -355,7 +357,7 @@ for _http_sid in $(uci -q show firewall 2>/dev/null \
     emit -q delete "firewall.$_http_sid"
 done
 
-case "${VPN_HTTP_ACCESS:-deny}" in
+case "${VPN_HTTP_ACCESS:-allow}" in
     allow)
         # /etc/shadow 第二字段：空 / ! 开头（锁定）/ * （不允许密码登录）都算没设密码
         _root_pw=$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)
@@ -373,7 +375,7 @@ case "${VPN_HTTP_ACCESS:-deny}" in
         ;;
     *)
         emit -q delete firewall.vpn_http
-        [ "${VPN_HTTP_ACCESS:-deny}" = "deny" ] || \
+        [ "${VPN_HTTP_ACCESS:-allow}" = "deny" ] || \
             warn "VPN_HTTP_ACCESS 取值非法（${VPN_HTTP_ACCESS}），按 deny 处理"
         ;;
 esac

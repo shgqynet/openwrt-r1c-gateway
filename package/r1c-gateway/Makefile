@@ -72,6 +72,10 @@ define Package/r1c-gateway/install
 	# 不用网线也能连上网关开本地管理页（详见脚本头注释）
 	$(INSTALL_BIN) ./files/etc/uci-defaults/92-r1c-emergency-ap.sh \
 		$(1)/etc/uci-defaults/92-r1c-emergency-ap.sh
+	# 出厂 root 密码：没有它，出厂的 VPN_HTTP_ACCESS="allow" 会被 r1c-apply 的
+	# 「root 无密码则拒绝放行」校验挡掉，刷完照样打不开后台（详见脚本头注释）。
+	$(INSTALL_BIN) ./files/etc/uci-defaults/93-r1c-root-password.sh \
+		$(1)/etc/uci-defaults/93-r1c-root-password.sh
 	# 本地应急管理页（http://<lan-ip>/cgi-bin/r1c）
 	#
 	# ⚠️ 不要改成 /usr/lib/lua/luci/ 下的 LuCI 页面：
