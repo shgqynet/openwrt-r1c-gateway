@@ -83,6 +83,12 @@ define Package/r1c-gateway/install
 	$(INSTALL_BIN) ./files/www/cgi-bin/r1c $(1)/www/cgi-bin/r1c
 	# LuCI 菜单入口：把上面的 CGI 页嵌进后台（不是重写成 LuCI 表单，理由同上）。
 	# 缺了 menu.d 这一项，页面能打开但后台目录里看不到入口（2026-10-07 踩）。
+	# USB 4G / 手机共享网络热插拔接管：模块插上后由 usb-modeswitch 切成网卡，
+	# 再由这个 hotplug 脚本绑到 wan4g 并拉起（详见脚本头注释）。
+	# 少了它，4G 只能靠"插着模块再跑一次 r1c-apply"才能用。
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/usb
+	$(INSTALL_BIN) ./files/etc/hotplug.d/usb/95-r1c-usb-wan.sh \
+		$(1)/etc/hotplug.d/usb/95-r1c-usb-wan.sh
 	$(INSTALL_DIR) $(1)/usr/share/luci/menu.d
 	$(INSTALL_DATA) ./files/usr/share/luci/menu.d/luci-app-r1c.json \
 		$(1)/usr/share/luci/menu.d/luci-app-r1c.json

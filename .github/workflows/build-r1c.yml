@@ -222,6 +222,7 @@ jobs:
           etc/uci-defaults/90-r1c-wireless-sta.sh \
           etc/uci-defaults/91-r1c-luci-lang.sh \
           etc/uci-defaults/92-r1c-emergency-ap.sh \
+          etc/hotplug.d/usb/95-r1c-usb-wan.sh \
           lib/upgrade/keep.d/r1c-gateway \
           www/cgi-bin/r1c \
           usr/share/luci/menu.d/luci-app-r1c.json \
@@ -272,6 +273,7 @@ jobs:
           etc/uci-defaults/90-r1c-wireless-sta.sh \
           etc/uci-defaults/91-r1c-luci-lang.sh \
           etc/uci-defaults/92-r1c-emergency-ap.sh \
+          etc/hotplug.d/usb/95-r1c-usb-wan.sh \
           www/cgi-bin/r1c
         do
           if [ -x "$ROOTFS/$f" ]; then

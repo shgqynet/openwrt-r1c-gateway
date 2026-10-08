@@ -481,31 +481,42 @@ else
 
     _i=0
     MEMBERS=""
-    for _kw in ${WAN_PRIORITY:-ethernet usb4g usbtether wifi}; do
+    # 缺省顺序与 site.conf 出厂值一致：网线 > WiFi热点 > 4G > USB共享。
+    # 4G 是**备用**而非主用 —— 现场能用网线或手机热点时不消耗 4G 流量。
+    for _kw in ${WAN_PRIORITY:-ethernet wifi usb4g usbtether}; do
         _iface=$(wan_iface_of "$_kw") || { warn "WAN_PRIORITY 含未知关键字 '$_kw'，跳过"; continue; }
         _dev=""
         case "$_kw" in
             usb4g)
                 _dev="${WAN_4G_DEVICE:-auto}"
                 [ "$_dev" = "auto" ] && _dev=$(detect_usb_net cdc_ncm huawei_cdc_ncm cdc_ether)
-                if [ -z "$_dev" ]; then
-                    info "未检测到 4G 网卡（模块未插 / 还停在 U 盘模式），跳过 usb4g"
-                    continue
-                fi
                 emit set network.wan4g=interface
-                emit set network.wan4g.device="$_dev"
                 emit set network.wan4g.proto='dhcp'
+                if [ -z "$_dev" ]; then
+                    # 模块没插 / 还停在 U 盘模式：接口照样建好，但 auto=0 不主动拉起。
+                    # 这样它会被写进 mwan3 策略处于 offline 待命 —— 之后插上模块由
+                    # hotplug 补 device 拉起即可接管，**不必再跑一次 apply**。
+                    # （早期实现是"探测不到就跳过"，结果后来插上 4G 也不生效，
+                    #  必须重跑 apply 才能用，现场没人会记得。）
+                    emit set network.wan4g.auto='0'
+                    _dev="待命（未检测到 4G 网卡）"
+                else
+                    emit set network.wan4g.device="$_dev"
+                    emit set network.wan4g.auto='1'
+                fi
                 ;;
             usbtether)
                 _dev="${WAN_TETHER_DEVICE:-auto}"
                 [ "$_dev" = "auto" ] && _dev=$(detect_usb_net rndis_host)
-                if [ -z "$_dev" ]; then
-                    info "未检测到 USB 共享网络，跳过 usbtether"
-                    continue
-                fi
                 emit set network.wantether=interface
-                emit set network.wantether.device="$_dev"
                 emit set network.wantether.proto='dhcp'
+                if [ -z "$_dev" ]; then
+                    emit set network.wantether.auto='0'
+                    _dev="待命（未检测到 USB 共享网络）"
+                else
+                    emit set network.wantether.device="$_dev"
+                    emit set network.wantether.auto='1'
+                fi
                 ;;
             wifi)
                 # STA 由 wireless 配置里的 network=wwan 绑定，此处不设 device，
@@ -548,6 +559,15 @@ else
             emit set "mwan3.$_iface=interface"
             emit set "mwan3.$_iface.enabled=1"
             emit set "mwan3.$_iface.track_ip=${MWAN_TRACK_IPS:-223.5.5.5 114.114.114.114}"
+            # ⚠️ 上行切换时必须清 conntrack，否则自动切换等于白做：
+            #    WireGuard 是一条长期存在的 UDP 流，conntrack 会把它钉死在旧接口上。
+            #    主用断掉、4G 顶上之后，WG 包仍从已经死掉的上行发出去，
+            #    表现为"4G 明明通了、ping 公网也通，PLC 就是不通"，
+            #    最长要等 conntrack 超时（UDP 默认 120s+）才自愈，现场只会当成"坏了"。
+            #    mwan3 只有在 uci 里显式声明才会清（见 /lib/mwan3/mwan3.sh
+            #    mwan3_flush_conntrack：遍历 list flush_conntrack 匹配 ifup/ifdown）。
+            emit add_list "mwan3.$_iface.flush_conntrack=ifup"
+            emit add_list "mwan3.$_iface.flush_conntrack=ifdown"
             emit set "mwan3.$_iface.reliability=1"
             emit set "mwan3.$_iface.count=1"
             emit set "mwan3.$_iface.timeout=4"
