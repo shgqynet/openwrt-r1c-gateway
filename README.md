@@ -172,6 +172,25 @@ r1c-apply             # 真正落地，reload 网络/防火墙，不重启
 | `VPN_HTTP_ACCESS` | `deny` | 是否允许从 VPN 侧打开管理后台。**设 `allow` 前必须先 `passwd root`** —— 未设密码时 `r1c-apply` 会拒绝放行并告警，避免出厂裸奔 |
 | `REMOTE_MAINTENANCE` | `disabled` | 远程维护开关与超时 |
 
+### 多上行与自动切换（4G 默认作备用）
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `WAN_PRIORITY` | `ethernet wifi usb4g usbtether` | 上行优先级，**4G 出厂定位为备用**：网线、热点都断掉时 4G 才顶上 |
+| `WAN_FAILOVER` | `mwan3` | `mwan3` 主动探测（能识别"插着线但没网"）/ `metric` 仅靠内核选路 / `off` |
+| `MWAN_TRACK_IPS` | 三个公共 DNS | 探测点。**别填 Hub 地址** —— 探测点一挂会误判并把上行整体切走 |
+| `WAN_4G_DEVICE` / `WAN_TETHER_DEVICE` | `auto` | 按驱动名自动探测；也可写死 `eth1` / `usb0` |
+
+- **有线 WAN 开箱即用**：插上能上网的网线自动出网，不需要任何配置。4G 与 USB 共享属备用手段。
+- **USB 4G 模块插上默认停在 U 盘模式**，由 `usb-modeswitch` 切成网卡后才可用。
+  实测华为 E3131：`12d1:1f01`（U 盘）→ `12d1:14db`，`cdc_ether` 随即注册出 `eth1`，
+  属 HiLink 网卡模式，**免 PPP/QMI 拨号**。
+- **可以先不插模块**：`r1c-apply` 会照样建好接口并纳入切换策略（处于待命），
+  之后插上由 hotplug 自动接管，**不必重跑一次 apply**。
+- ⚠️ 切换是 **failover，不是负载均衡**：WireGuard 是单条 UDP 流，一旦在两条上行间均衡，
+  源 IP 会来回跳、Hub 端看到的 endpoint 反复变化，表现为隧道每隔几分钟重建一次、PLC 间歇不通。
+- 现场验证：`mwan3 status`（主用应显示 online，其余为备用）。
+
 > 完整参数列表与逐条注释见 [`files/etc/r1c/site.conf`](files/etc/r1c/site.conf)。
 
 ---

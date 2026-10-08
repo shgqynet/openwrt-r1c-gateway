@@ -184,6 +184,26 @@ r1c-apply             # apply for real: reloads network/firewall, no reboot
 | `VPN_HTTP_ACCESS` | `deny` | Whether the admin UI is reachable over the VPN. **Run `passwd root` before setting `allow`** — with no password set, `r1c-apply` refuses to open the UI and warns you, which avoids shipping an exposed box |
 | `REMOTE_MAINTENANCE` | `disabled` | Remote maintenance toggle and timeout |
 
+### Multiple uplinks and failover (4G is a backup by default)
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `WAN_PRIORITY` | `ethernet wifi usb4g usbtether` | Uplink order. **4G ships as a backup** — it takes over only when both Ethernet and the hotspot are down |
+| `WAN_FAILOVER` | `mwan3` | `mwan3` actively probes (detects "cable plugged but no Internet") / `metric` lets the kernel pick / `off` |
+| `MWAN_TRACK_IPS` | three public DNS servers | Probe targets. **Do not put the Hub address here** — if a probe target dies, the uplink gets switched away for nothing |
+| `WAN_4G_DEVICE` / `WAN_TETHER_DEVICE` | `auto` | Auto-detect by driver name; can be pinned to `eth1` / `usb0` |
+
+- **Ethernet WAN works out of the box**: plug in a working cable and it goes online, no configuration. 4G and USB tethering are backups.
+- **A USB 4G dongle boots in mass-storage mode** and only becomes a NIC after `usb-modeswitch` flips it.
+  Measured on a Huawei E3131: `12d1:1f01` (storage) → `12d1:14db`, then `cdc_ether` registers `eth1`.
+  That is HiLink NIC mode — **no PPP/QMI dialling needed**.
+- **The dongle does not have to be plugged in at apply time**: `r1c-apply` still creates the interface and
+  adds it to the policy (standing by). Plug it in later and hotplug takes over — **no need to re-run apply**.
+- ⚠️ This is **failover, not load balancing**: WireGuard is a single UDP flow. Balancing it across two uplinks
+  makes the source IP flip back and forth, so the Hub keeps seeing a new endpoint — the tunnel rebuilds every
+  few minutes and the PLC goes intermittent.
+- Verify on site with `mwan3 status` (the active uplink should read `online`, the rest are backups).
+
 > Full parameter list with per-line rationale: [`files/etc/r1c/site.conf`](files/etc/r1c/site.conf).
 
 ---
