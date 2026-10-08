@@ -238,6 +238,23 @@ jobs:
           echo "::error::rootfs 缺少 $MISSING 个 r1c 文件，中止发布"
           exit 1
         fi
+        # 文件在 ≠ 参数在。site.conf 新增开关后若忘了同步到 files/ 版本，
+        # 构建照样全绿，但现场改开关会毫无效果 —— 这里按关键字兜一道。
+        # 2026-10-08：VPN_HTTP_ACCESS（VPN 侧是否开放管理后台）加入此项。
+        echo "--- site.conf 关键参数 ---"
+        for k in VPN_HTTP_ACCESS PLC_ROLE PLC_NETWORK PLC_SNAT AUTO_APPLY
+        do
+          if grep -q "^${k}=" "$ROOTFS/etc/r1c/site.conf"; then
+            echo "  ✅ $k"
+          else
+            echo "  ❌ site.conf 缺少参数 $k"
+            MISSING=$((MISSING+1))
+          fi
+        done
+        if [ "$MISSING" -ne 0 ]; then
+          echo "::error::rootfs 的 site.conf 缺少参数，中止发布"
+          exit 1
+        fi
         # ⚠️ 存在 ≠ 可用。脚本没有执行位时，构建全绿但真机
         #   ash: r1c-apply: Permission denied (exit 126)
         # 2026-10-06 真机踩到：rootfs overlay 覆盖了 package install 的 0755。
