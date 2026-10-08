@@ -61,7 +61,12 @@ if [ -d "$REPO_SRC/files" ]; then
     # 所以这个缺陷在 CI 里完全不报错，只有真机才暴露。
     # www/cgi-bin/r1c 也必须在这里补 +x：uhttpd 只执行带执行位的 CGI，
     # 否则浏览器打开 /cgi-bin/r1c 会直接下载源码而不是执行它。
-    find files/usr/bin files/etc/init.d files/etc/uci-defaults files/www/cgi-bin -type f \
+    # files/etc/hotplug.d（95-r1c-usb-wan.sh）2026-10-08 踩：原列表是按目录白名单写的，
+    # 新增 hotplug 目录时忘了补 → overlay 复制过去的 **644** 覆盖了 package install 的 755，
+    # rootfs 里就是 644。后果：4G 模块插上后 hotplug 根本不会被调用（ash 直接跳过无 +x 的
+    # 脚本），表现是"插上没反应"，而且构建会被 rootfs 的 -x 校验拦下白白浪费两小时。
+    # 改成「所有 .sh + 已知无扩展名的可执行目录」兜底，以后新增目录不用再来补一行。
+    find files -type f \( -name '*.sh' -o -path 'files/usr/bin/*' -o -path 'files/www/cgi-bin/*' \) \
         -exec chmod 0755 {} \; 2>/dev/null
     echo "  -> files overlay 已合并（脚本执行位已强制 0755）"
     ls -l files/usr/bin/ | sed 's/^/     /'

@@ -10,9 +10,9 @@
 # ⚠️ 只在 root **当前没有密码** 时写入：
 #   - 现场已经 passwd 过的设备不会被覆盖（sysupgrade 后本脚本会随新固件再跑一次，
 #     但检测到已有哈希就直接跳过，绝不改现场密码）
-#   - 仓库里只存 sha256crypt 哈希，不存明文
-#   - 出厂密码是公开的默认值，现场部署后**必须** passwd 改掉
-DEFAULT_ROOT_HASH='$5$r1cfactory$3Fj9IPD5JD/Ynq3DtvRS2plJ7N7UTTdPe1S8kWyhnr2'
+#   - 仓库公开的只有 sha256crypt **哈希**，但出厂密码本身是公开的弱口令
+#     （`password`），任何人离线一算就出来 —— 现场部署第一件事就是 passwd 改掉
+DEFAULT_ROOT_HASH='$5$r1cfactory$NNlFXKkYWk1NNbh07c1BLWsDqfV.tTIyjXG0FksVx/4'
 
 _pw=$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)
 case "$_pw" in
