@@ -116,7 +116,17 @@ CUR_IP="${CUR%%:*}"
 LAST=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk -v k="$PUB" '$1==k {print $2}')
 [ -n "$LAST" ] || LAST=0
 NOW=$(date +%s 2>/dev/null || echo 0)
-AGE=$((NOW - LAST))
+
+# 从未握过手时 LAST=0，直接 NOW-0 会算出 17 亿秒这种荒谬值（2026-10-08 重启后
+# 实测日志里出现过 "握手已停 1791474988s"）。这里单独标记，并视为超时 ——
+# 刚开机还没握手过，强制设一次 endpoint 有助于立刻指向最新 IP。
+if [ "$LAST" = "0" ]; then
+    AGE_TXT="从未握手"
+    AGE=$((STALE + 1))
+else
+    AGE=$((NOW - LAST))
+    AGE_TXT="${AGE}s"
+fi
 
 if [ -n "$NEW" ]; then
     # 解析成功：记住结果、清失败计数
@@ -130,7 +140,7 @@ if [ -n "$NEW" ]; then
         logger -t r1c-wg "endpoint 更新 ${CUR_IP:-none} -> ${NEW}（经 ${HOW}，公网 IP 已变化）"
     elif [ "$AGE" -gt "$STALE" ]; then
         wg set "$WG_IF" peer "$PUB" endpoint "${NEW}:${PORT}" 2>/dev/null
-        logger -t r1c-wg "握手超时 ${AGE}s，重设 endpoint ${NEW} 强制重连"
+        logger -t r1c-wg "握手超时 ${AGE_TXT}，重设 endpoint ${NEW} 强制重连"
     fi
 else
     # 解析全挂：绝不静默退出。限流告警（每 20 次约 10 分钟一条，避免刷爆日志），
@@ -140,12 +150,12 @@ else
     N=$((N + 1))
     echo "$N" > "$FAILCNT"
     if [ $((N % 20)) -eq 1 ]; then
-        logger -t r1c-wg "警告：${HOST} 解析失败（连续 ${N} 次），当前 endpoint ${CUR_IP:-none}，握手已停 ${AGE}s"
+        logger -t r1c-wg "警告：${HOST} 解析失败（连续 ${N} 次），当前 endpoint ${CUR_IP:-none}，握手状态 ${AGE_TXT}"
     fi
     OLD=$(cat "$STATE" 2>/dev/null)
     if [ -n "$OLD" ] && [ "$AGE" -gt "$STALE" ]; then
         wg set "$WG_IF" peer "$PUB" endpoint "${OLD}:${PORT}" 2>/dev/null
-        logger -t r1c-wg "解析失败兜底：用上次已知 IP ${OLD} 强制重连（握手已停 ${AGE}s）"
+        logger -t r1c-wg "解析失败兜底：用上次已知 IP ${OLD} 强制重连（握手状态 ${AGE_TXT}）"
     fi
 fi
 

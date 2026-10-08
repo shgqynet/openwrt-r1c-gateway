@@ -24,6 +24,14 @@ boot() {
     log_msg SYSTEM "boot: site=${SITE_ID:-UNSET} vpn_mode=${VPN_MODE:-wireguard}"
     # 启动顺序（需求 §19）：Internet -> NTP -> VPN，禁止时间错误时立刻起 VPN
     log_msg SYSTEM "boot: waiting for NTP sync before VPN"
+
+    # ⚠️ 必须显式 start：/etc/rc.common 的默认 boot() 就是 `start "$@"` 的包装，
+    #    一旦在这里重写 boot() 又不调 start，开机走的就是这条路径 ——
+    #    服务永不自启，主循环（watchdog / 检测 / 恢复）一次都不会跑。
+    #    2026-10-08 现场故障：Hub 家宽重拨换 IP（120.6.2.144 -> 120.6.2.44），
+    #    watchdog 从未运行，隧道断了 1 小时无法自愈，只能人到现场手工 wg set。
+    #    这个坑排查了很久：从现象看像是"DNS 没解析"，实际是服务压根没起来。
+    start "$@"
 }
 
 start_service() {
