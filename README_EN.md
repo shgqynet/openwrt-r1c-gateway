@@ -75,7 +75,7 @@ no inbound ports, no port forwarding, and no changes to the customer's existing 
 ### 3.1 Use a prebuilt image (recommended)
 
 ```bash
-# Download from Releases (private repo — needs an authenticated gh CLI)
+# Download from Releases (public repo — anonymous download works)
 gh release download <version> -R <owner>/<repo> -p "*.bin" -p "sha256sums"
 
 # Verify
@@ -327,10 +327,12 @@ Note this governs access **to the R1C itself**; reaching **other devices** on th
 through the forward chain, which has **no port filtering** at all.
 
 **Q: What is the factory root password?**
-A: A public default password is baked into the image (written on first boot by
-`uci-defaults/93-r1c-root-password.sh`; only the hash lives in the repo). **Change it with `passwd` once the
-box is on site.** The script only writes when root has no password yet, so a customized password is never
-overwritten by an upgrade.
+A: The factory root password is **`password`** — deliberately weak, and public: this repo is open, the
+sha256crypt hash sits in `uci-defaults/93-r1c-root-password.sh` and the plaintext is spelled out in its
+comments. **Change it with `passwd` as the very first step on site.** Once changed, the script never touches
+it again (not even across upgrades).
+⚠️ This repository is public: all examples use placeholder subnets and `site.conf` ships placeholder values
+only; real site configuration lives on the device.
 
 **Q: Handshake looks fine but the PLC is unreachable.**
 A: Usually a multi-site **subnet collision** — the same CIDR assigned to two peers makes WireGuard silently

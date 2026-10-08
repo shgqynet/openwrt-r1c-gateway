@@ -72,7 +72,7 @@
 ### 3.1 直接用预编译固件（推荐）
 
 ```bash
-# 从 Release 页下载（本仓库为私有仓库，需用 gh 登录）
+# 从 Release 页下载（公开仓库，匿名也能下）
 gh release download <版本号> -R <owner>/<repo> -p "*.bin" -p "sha256sums"
 
 # 校验
@@ -307,8 +307,10 @@ A：`firewall.vpn` 区的 input 默认是 REJECT，只放行 SSH(22) 与 ICMP，
 注意这只影响**访问 R1C 自己**；访问网段内**其他设备**（PLC、HMI）走的是 forward 链，那里没有任何端口限制。
 
 **Q：出厂 root 密码是什么？**
-A：固件内置一个公开的默认密码（首次开机由 `uci-defaults/93-r1c-root-password.sh` 写入，仓库里只存哈希）。
-**现场部署后必须 `passwd` 改掉**。脚本只在 root 尚无密码时写入，改过的设备升级后不会被覆盖。
+A：出厂 root 密码是 **`password`**（弱口令，首次开机由 `uci-defaults/93-r1c-root-password.sh`
+写入仓库里那个 sha256crypt 哈希，脚本注释里也写着明文 —— 本仓库公开，等于人尽皆知）。
+**现场部署第一件事就是 `passwd` 改掉**，改过之后脚本不会再覆盖（升级也一样）。
+⚠️ 本仓库是公开仓库：所有示例都用占位网段，`site.conf` 只含占位值，真实现场配置在设备本地。
 
 **Q：为什么握手正常但 ping 不通 PLC？**
 A：多半是多站点**网段撞车** —— 同一个 CIDR 被配给了两个 peer，WireGuard 会静默丢掉最后一个。
