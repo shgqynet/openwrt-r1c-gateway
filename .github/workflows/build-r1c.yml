@@ -240,9 +240,11 @@ jobs:
         fi
         # 文件在 ≠ 参数在。site.conf 新增开关后若忘了同步到 files/ 版本，
         # 构建照样全绿，但现场改开关会毫无效果 —— 这里按关键字兜一道。
-        # 2026-10-08：VPN_HTTP_ACCESS（VPN 侧是否开放管理后台）加入此项。
+        # 2026-10-08：VPN_HTTP_ACCESS（VPN 侧是否开放管理后台）、
+        #             WAN_FAILOVER / WAN_PRIORITY（多 WAN 自动切换）加入此项。
         echo "--- site.conf 关键参数 ---"
-        for k in VPN_HTTP_ACCESS PLC_ROLE PLC_NETWORK PLC_SNAT AUTO_APPLY
+        for k in VPN_HTTP_ACCESS PLC_ROLE PLC_NETWORK PLC_SNAT AUTO_APPLY \
+                 WAN_PRIORITY WAN_FAILOVER MWAN_TRACK_IPS
         do
           if grep -q "^${k}=" "$ROOTFS/etc/r1c/site.conf"; then
             echo "  ✅ $k"
