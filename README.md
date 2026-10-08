@@ -177,7 +177,7 @@ r1c-apply             # 真正落地，reload 网络/防火墙，不重启
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `WAN_PRIORITY` | `ethernet wifi usb4g usbtether` | 上行优先级，**4G 出厂定位为备用**：网线、热点都断掉时 4G 才顶上 |
-| `WAN_FAILOVER` | `mwan3` | `mwan3` 主动探测（能识别"插着线但没网"）/ `metric` 仅靠内核选路 / `off` |
+| `WAN_FAILOVER` | `metric` | `metric` 靠内核按 metric 选路（默认，零依赖、实测可靠）/ `mwan3` 主动探测 / `off` |
 | `MWAN_TRACK_IPS` | 三个公共 DNS | 探测点。**别填 Hub 地址** —— 探测点一挂会误判并把上行整体切走 |
 | `WAN_4G_DEVICE` / `WAN_TETHER_DEVICE` | `auto` | 按驱动名自动探测；也可写死 `eth1` / `usb0` |
 
@@ -189,7 +189,15 @@ r1c-apply             # 真正落地，reload 网络/防火墙，不重启
   之后插上由 hotplug 自动接管，**不必重跑一次 apply**。
 - ⚠️ 切换是 **failover，不是负载均衡**：WireGuard 是单条 UDP 流，一旦在两条上行间均衡，
   源 IP 会来回跳、Hub 端看到的 endpoint 反复变化，表现为隧道每隔几分钟重建一次、PLC 间歇不通。
-- 现场验证：`mwan3 status`（主用应显示 online，其余为备用）。
+
+**实测记录（2026-10-08，华为 E3131 4G 作备用）**：断开 WiFi 主用后，默认路由立即切到 4G，
+隧道 **0 秒恢复**、PLC 1.7ms 零丢包；主用恢复后自动切回。切换后**不需要清 conntrack** ——
+上行变了源 IP 就变，五元组不同即新建连接，WireGuard roaming 直接生效。
+
+> `mwan3` 目前**不作为默认**：本固件环境（24.10 + mwan3 2.11.16 + fw4）实测探测不成立 ——
+> 接口每次 online 后 1~2 秒就 disconnecting、约 40 秒后 offline，策略长期 `unreachable`。
+> 已排除 flush_conntrack、`family`、ping 兼容性、setuid/LD_PRELOAD、探测点可达性等因素，根因未定位。
+> 若确需"识别接口 UP 但上层没网"的能力，可自行启用并先用 `mwan3 status` 验证。
 
 > 完整参数列表与逐条注释见 [`files/etc/r1c/site.conf`](files/etc/r1c/site.conf)。
 

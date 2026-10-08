@@ -189,7 +189,7 @@ r1c-apply             # apply for real: reloads network/firewall, no reboot
 | Parameter | Default | Notes |
 | --- | --- | --- |
 | `WAN_PRIORITY` | `ethernet wifi usb4g usbtether` | Uplink order. **4G ships as a backup** — it takes over only when both Ethernet and the hotspot are down |
-| `WAN_FAILOVER` | `mwan3` | `mwan3` actively probes (detects "cable plugged but no Internet") / `metric` lets the kernel pick / `off` |
+| `WAN_FAILOVER` | `metric` | `metric` lets the kernel pick by metric (default, no dependencies, verified on real hardware) / `mwan3` actively probes / `off` |
 | `MWAN_TRACK_IPS` | three public DNS servers | Probe targets. **Do not put the Hub address here** — if a probe target dies, the uplink gets switched away for nothing |
 | `WAN_4G_DEVICE` / `WAN_TETHER_DEVICE` | `auto` | Auto-detect by driver name; can be pinned to `eth1` / `usb0` |
 
@@ -202,7 +202,16 @@ r1c-apply             # apply for real: reloads network/firewall, no reboot
 - ⚠️ This is **failover, not load balancing**: WireGuard is a single UDP flow. Balancing it across two uplinks
   makes the source IP flip back and forth, so the Hub keeps seeing a new endpoint — the tunnel rebuilds every
   few minutes and the PLC goes intermittent.
-- Verify on site with `mwan3 status` (the active uplink should read `online`, the rest are backups).
+**Measured 2026-10-08 with a Huawei E3131 as the backup uplink**: after dropping the WiFi primary,
+the default route moved to 4G immediately, the tunnel recovered in **0 seconds** and the PLC stayed at
+1.7 ms with zero loss; when the primary came back it switched back on its own. No conntrack flush is
+needed — a new uplink means a new source IP, which means a new 5-tuple, so WireGuard roaming just works.
+
+> `mwan3` is **not the default**: on this image (24.10 + mwan3 2.11.16 + fw4) probing does not hold —
+> every interface reads `online` for 1–2 seconds, then `disconnecting`, then `offline` about 40 s later,
+> leaving the policy `unreachable`. Ruled out: `flush_conntrack`, `family`, ping compatibility,
+> setuid/LD_PRELOAD, probe-target reachability. Root cause not identified.
+> If you do need "interface up but no Internet" detection, enable it and validate with `mwan3 status` first.
 
 > Full parameter list with per-line rationale: [`files/etc/r1c/site.conf`](files/etc/r1c/site.conf).
 

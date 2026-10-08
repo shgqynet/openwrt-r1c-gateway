@@ -409,7 +409,7 @@ else
 fi
 
 echo
-echo "[5/5] 多 WAN 与自动切换（机制: ${WAN_FAILOVER:-mwan3}）"
+echo "[5/5] 多 WAN 与自动切换（机制: ${WAN_FAILOVER:-metric}）"
 
 # --- USB 网卡探测 -------------------------------------------------------------
 # 4G 模块（HiLink 类）与手机 USB 共享网络，在切换/连接之后都表现为一张**USB 网卡**，
@@ -443,12 +443,12 @@ wan_iface_of() { # 关键字 → uci 接口名
     esac
 }
 
-if [ "${WAN_FAILOVER:-mwan3}" = "off" ]; then
+if [ "${WAN_FAILOVER:-metric}" = "off" ]; then
     info "WAN_FAILOVER=off —— 不做多 WAN 切换，维持现状"
 else
     # mwan3 未装时自动退化为 metric（装了却没有二进制会很尴尬，别直接放弃）
     DO_MWAN=0
-    case "${WAN_FAILOVER:-mwan3}" in
+    case "${WAN_FAILOVER:-metric}" in
         mwan3)
             if command -v mwan3 >/dev/null 2>&1; then DO_MWAN=1
             else warn "mwan3 未安装，退化为 metric 方式"; fi ;;
@@ -559,15 +559,18 @@ else
             emit set "mwan3.$_iface=interface"
             emit set "mwan3.$_iface.enabled=1"
             emit set "mwan3.$_iface.track_ip=${MWAN_TRACK_IPS:-223.5.5.5 114.114.114.114}"
-            # ⚠️ 上行切换时必须清 conntrack，否则自动切换等于白做：
-            #    WireGuard 是一条长期存在的 UDP 流，conntrack 会把它钉死在旧接口上。
-            #    主用断掉、4G 顶上之后，WG 包仍从已经死掉的上行发出去，
-            #    表现为"4G 明明通了、ping 公网也通，PLC 就是不通"，
-            #    最长要等 conntrack 超时（UDP 默认 120s+）才自愈，现场只会当成"坏了"。
-            #    mwan3 只有在 uci 里显式声明才会清（见 /lib/mwan3/mwan3.sh
-            #    mwan3_flush_conntrack：遍历 list flush_conntrack 匹配 ifup/ifdown）。
-            emit add_list "mwan3.$_iface.flush_conntrack=ifup"
-            emit add_list "mwan3.$_iface.flush_conntrack=ifdown"
+            # ⚠️ 这里**刻意不配 flush_conntrack**（2026-10-08 真机实测结论）：
+            #    最初的推理是"WG 是长期 UDP 流，会被 conntrack 钉死在旧接口上，
+            #    切换后必须清表"。实测把这个推理**证伪**了：
+            #      断开 WiFi 主用 → 默认路由立即切到 eth1 → 隧道 TUNNEL-OK after 0s
+            #      → PLC 1.7ms 0% 丢包，全程无中断（详见 fo.sh 测试记录）。
+            #    原因：切换上行后**源 IP 必然变化**（4G 与热点是不同公网出口），
+            #    五元组不同 → 建的是**新** conntrack 条目 → WireGuard roaming 立刻生效，
+            #    旧条目只是自然老化，不构成阻碍。
+            #    而 flush_conntrack 的实现是 `echo f > /proc/net/nf_conntrack`，
+            #    **清空整张表、不做过滤**，会把 mwan3 自己的 ping 探测连接一起清掉
+            #    （实测：18:55:54 online → 18:55:59 disconnecting → 18:56:43 offline）。
+            #    收益为零、副作用明确，因此不加。
             emit set "mwan3.$_iface.reliability=1"
             emit set "mwan3.$_iface.count=1"
             emit set "mwan3.$_iface.timeout=4"
