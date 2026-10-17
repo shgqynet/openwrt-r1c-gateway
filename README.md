@@ -303,6 +303,7 @@ openwrt-r1c-gateway/
 | [docs/VPN-COMPATIBILITY.md](docs/VPN-COMPATIBILITY.md) | WireGuard / ZeroTier / Tailscale / cloudflared 在 mt7620 上的选型依据（含实测体积数据） |
 | [docs/FLASH-RUNBOOK.md](docs/FLASH-RUNBOOK.md) | 逐步骤刷机作业手册（开工前检查表 + 三段式流程） |
 | [docs/FIRST-BOOT.md](docs/FIRST-BOOT.md) | 首次上电会发生什么，以及"看起来没起来"的排查思路 |
+| [docs/CHANGE-PLC-NETWORK.md](docs/CHANGE-PLC-NETWORK.md) | 现场改网段/改网关地址作业卡：R1C、Hub、工程师 PC 三处必须同步 |
 
 ---
 
