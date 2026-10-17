@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+# ==============================================================================
+# r1c-lan-guard —— br-lan 开机自愈的启动器
+#
+# 真正的逻辑在 /etc/r1c/lan-guard.sh（放 /etc/r1c 是为了 sysupgrade 后保留）。
+#
+# 【为什么需要它】开机后 LAN 桥偶尔拿不到 IP：/sys/class/net 里没有 eth0.1，
+#   br-lan state DOWN、ifstatus lan 报 DEVICE_CLAIM_FAILED。此时 R1C 的上行和
+#   隧道都正常（Hub 上看它"在线"），但 Hub 的「远程配置」和「远程监控」都走
+#   **lan_ip**，会全部失效 —— 症状是"在线却远程不了"，极具迷惑性。
+#   （2026-10-17 二/三号机同时中招，判定为开机竞争，非必现。）
+#
+# ⚠️ 必须显式写 boot() 并调用 start：/etc/rc.common 的默认 boot() 就是
+#    start "$@"，但**一旦重写就必须自己调** —— 2026-10-08 r1c-gateway 正是
+#    栽在这里：start 正常、开机却永不自启，排查了很久。
+# ==============================================================================
+
+START=99
+
+boot() { start "$@"; }
+
+start() {
+    [ -x /etc/r1c/lan-guard.sh ] || return 0
+    # 后台跑：脚本内部先 sleep 20 再轮询，不能阻塞启动流程
+    setsid /etc/r1c/lan-guard.sh >/dev/null 2>&1 &
+}
+
+stop() { :; }

@@ -66,7 +66,11 @@ if [ -d "$REPO_SRC/files" ]; then
     # rootfs 里就是 644。后果：4G 模块插上后 hotplug 根本不会被调用（ash 直接跳过无 +x 的
     # 脚本），表现是"插上没反应"，而且构建会被 rootfs 的 -x 校验拦下白白浪费两小时。
     # 改成「所有 .sh + 已知无扩展名的可执行目录」兜底，以后新增目录不用再来补一行。
-    find files -type f \( -name '*.sh' -o -path 'files/usr/bin/*' -o -path 'files/www/cgi-bin/*' \) \
+    # files/etc/init.d/* 也必须在内：init.d 脚本按惯例**没有 .sh 后缀**
+    # （r1c-lan-guard 就是），只按 *.sh 匹配会漏掉它，rootfs 里变 644。
+    find files -type f \( -name '*.sh' -o -path 'files/usr/bin/*' \
+        -o -path 'files/www/cgi-bin/*' -o -path 'files/etc/init.d/*' \
+        -o -path 'files/etc/r1c/*' \) \
         -exec chmod 0755 {} \; 2>/dev/null
     echo "  -> files overlay 已合并（脚本执行位已强制 0755）"
     ls -l files/usr/bin/ | sed 's/^/     /'

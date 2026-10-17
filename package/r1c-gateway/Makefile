@@ -43,6 +43,10 @@ endef
 define Package/r1c-gateway/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/r1c-gateway $(1)/etc/init.d/r1c-gateway
+	# br-lan 开机自愈：LAN 桥偶尔拿不到 IP（缺 eth0.1），而 Hub 的远程配置/
+	# 远程监控走的是 lan_ip，一挂就是"在线却远程不了"。详见脚本头注释。
+	$(INSTALL_BIN) ./files/etc/init.d/r1c-lan-guard $(1)/etc/init.d/r1c-lan-guard
+	$(INSTALL_BIN) ./files/etc/r1c/lan-guard.sh $(1)/etc/r1c/lan-guard.sh
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./files/usr/bin/r1c-status $(1)/usr/bin/r1c-status
 	$(INSTALL_BIN) ./files/usr/bin/r1c-diagnose $(1)/usr/bin/r1c-diagnose
@@ -105,6 +109,7 @@ define Package/r1c-gateway/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
   /etc/init.d/r1c-gateway enable
+  /etc/init.d/r1c-lan-guard enable
 }
 exit 0
 endef
