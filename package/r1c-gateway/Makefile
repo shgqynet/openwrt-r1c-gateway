@@ -46,7 +46,6 @@ define Package/r1c-gateway/install
 	# br-lan 开机自愈：LAN 桥偶尔拿不到 IP（缺 eth0.1），而 Hub 的远程配置/
 	# 远程监控走的是 lan_ip，一挂就是"在线却远程不了"。详见脚本头注释。
 	$(INSTALL_BIN) ./files/etc/init.d/r1c-lan-guard $(1)/etc/init.d/r1c-lan-guard
-	$(INSTALL_BIN) ./files/etc/r1c/lan-guard.sh $(1)/etc/r1c/lan-guard.sh
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./files/usr/bin/r1c-status $(1)/usr/bin/r1c-status
 	$(INSTALL_BIN) ./files/usr/bin/r1c-diagnose $(1)/usr/bin/r1c-diagnose
@@ -55,6 +54,10 @@ define Package/r1c-gateway/install
 	$(INSTALL_BIN) ./files/usr/bin/r1c-wg-watchdog $(1)/usr/bin/r1c-wg-watchdog
 	$(INSTALL_DIR) $(1)/etc/r1c
 	$(INSTALL_CONF) ./files/etc/r1c/site.conf $(1)/etc/r1c/site.conf
+	# ⚠️ 必须在上面的 $(INSTALL_DIR) $(1)/etc/r1c **之后**：install 不会自动建目录，
+	#    写在前面会报 "No such file or directory"（2026-10-17 构建在 1h12m 处失败，
+	#    白跑一小时——Makefile 里所有 INSTALL_BIN 都要确认目标目录已先 INSTALL_DIR）。
+	$(INSTALL_BIN) ./files/etc/r1c/lan-guard.sh $(1)/etc/r1c/lan-guard.sh
 	# sysupgrade 保留 /etc/r1c/ —— 没有这条，升级会把站点配置和 WG 私钥一起抹掉。
 	#
 	# ⚠️ 这个坑是 2026-10-07 准备刷机时实测发现的：/etc/sysupgrade.conf 里只有

@@ -53,6 +53,13 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    # ⚠️ 必须**最先**跑：2026-10-17 因 install 顺序写反（先 INSTALL_BIN 后
+    # INSTALL_DIR），构建跑到 1 小时 12 分才失败，白等一晚上。
+    # 这个检查几秒钟就能发现同类问题，放在最前面避免浪费整轮编译。
+    - name: Check package Makefile install order
+      run: |
+        python3 scripts/check-makefile-install.py package/r1c-gateway/Makefile
+
     # 14 GB SSD 不够用，必须清理预装的大型工具链
     - name: Free Disk Space
       uses: jlumbroso/free-disk-space@main
