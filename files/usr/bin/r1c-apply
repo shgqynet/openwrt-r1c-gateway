@@ -613,6 +613,20 @@ if [ "$MODE" = "dryrun" ]; then
     exit 0
 fi
 
+# --- 主机名 ------------------------------------------------------------------
+# 纯标识用途：WireGuard 认的是公钥 + 隧道 IP，跟主机名无关。
+# 但多站点同时在 Hub 上时，全叫 OpenWrt 根本分不清哪台是哪个现场，
+# 下发配置时尤其危险（三台配置只差网段，发错台就串网段了）。
+# ⚠️ site.conf 里一直有 HOSTNAME 这个键，但旧版 r1c-apply 从没读过它
+#    （死键），所以早期出厂设备刷完主机名仍是不变的 OpenWrt。
+if [ -n "${HOSTNAME:-}" ] && [ "${HOSTNAME}" != "$(uci -q get system.@system[0].hostname 2>/dev/null)" ]; then
+    uci set system.@system[0].hostname="${HOSTNAME}"
+    uci commit system
+    echo "${HOSTNAME}" > /proc/sys/kernel/hostname
+    /etc/init.d/system reload >/dev/null 2>&1 || warn "system reload 失败（主机名可能要下次重启才生效）"
+    ok "主机名 → ${HOSTNAME}"
+fi
+
 uci commit network
 uci commit firewall
 [ "${DO_MWAN:-0}" = "1" ] && uci commit mwan3
